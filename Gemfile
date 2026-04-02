@@ -1,0 +1,11 @@
+source 'https://rubygems.org'
+
+gem 'sinatra',   '~> 3.1'
+gem 'sinatra-contrib', '~> 3.1'
+gem 'puma',      '~> 6.4'
+gem 'mysql2',    '~> 0.5'
+gem 'mail',      '~> 2.8'
+gem 'dotenv',    '~> 3.1'
+gem 'json'
+gem 'openssl'
+gem 'securerandom'
