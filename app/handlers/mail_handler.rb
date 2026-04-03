@@ -14,15 +14,26 @@ module Handlers
     def send_mail(request, client)
       data = parse_json(request)
 
-      if data['to'].nil? || data['to'].to_s.empty?
+      # Validate: to is required (string or array)
+      to = data['to']
+      if to.nil? || (to.is_a?(String) && to.empty?) || (to.is_a?(Array) && to.compact.reject(&:empty?).empty?)
         return json_response({ error: 'Missing required field: to' }, 400)
       end
 
-      to      = data['to']
-      subject = data['subject'] || '(no subject)'
-      body    = data['body'] || ''
+      params = {
+        to:       Array(to).compact.reject(&:empty?),
+        cc:       data['cc'],
+        bcc:      data['bcc'],
+        reply_to: data['replyTo'],
+        from:     data['from'],
+        subject:  data['subject'] || '(no subject)',
+        body:     data['body'] || '',
+        is_html:  data['isHtml'],
+        priority: data['priority'],
+        headers:  data['headers']
+      }
 
-      result = @mail_service.send(client, to, subject, body)
+      result = @mail_service.send(client, params)
 
       if result[:success]
         json_response({ message: 'Email sent successfully' })
@@ -35,7 +46,7 @@ module Handlers
     # Retrieve mail send history for the authenticated client.
     def logs(client)
       results = Services::Database.query(
-        'SELECT ml.id, ml.to_address, ml.subject, ml.status, ml.error, ml.created_at
+        'SELECT ml.id, ml.to_address, ml.cc, ml.bcc, ml.reply_to, ml.priority, ml.subject, ml.status, ml.error, ml.created_at
          FROM mail_logs ml
          JOIN clients c ON c.id = ml.client_id
          WHERE c.organization_id = ?
@@ -44,14 +55,19 @@ module Handlers
       )
 
       logs = results.map do |row|
-        {
+        entry = {
           id:         row['id'],
-          to_address: row['to_address'],
+          to_address: parse_json_field(row['to_address']),
           subject:    row['subject'],
           status:     row['status'],
           error:      row['error'],
           created_at: row['created_at']&.to_s
         }
+        entry[:cc]       = parse_json_field(row['cc']) if row['cc']
+        entry[:bcc]      = parse_json_field(row['bcc']) if row['bcc']
+        entry[:reply_to] = row['reply_to'] if row['reply_to']
+        entry[:priority] = row['priority'] if row['priority']
+        entry
       end
 
       json_response({
@@ -71,6 +87,14 @@ module Handlers
       JSON.parse(body)
     rescue JSON::ParserError
       {}
+    end
+
+    def parse_json_field(value)
+      return value unless value.is_a?(String)
+
+      JSON.parse(value)
+    rescue JSON::ParserError
+      value
     end
 
     def json_response(payload, status = 200)

@@ -264,13 +264,20 @@ Send an email using the authenticated client's stored SMTP configuration.
 
 **Request body:**
 
-| Field     | Type   | Required | Description                        |
-|-----------|--------|----------|------------------------------------|
-| `to`      | string | yes      | Recipient email address            |
-| `subject` | string | no       | Email subject (default: no subject)|
-| `body`    | string | no       | Email body, supports HTML          |
+| Field      | Type              | Required | Description                                        |
+|------------|-------------------|----------|----------------------------------------------------|
+| `to`       | string or string[]| yes      | Recipient(s) email address(es)                     |
+| `subject`  | string            | no       | Email subject (default: `(no subject)`)            |
+| `body`     | string            | no       | Email body                                         |
+| `cc`       | string[]          | no       | CC recipients                                      |
+| `bcc`      | string[]          | no       | BCC recipients                                     |
+| `replyTo`  | string            | no       | Reply-To address                                   |
+| `from`     | string            | no       | Override sender (default: client's `from_address`) |
+| `isHtml`   | boolean           | no       | Force HTML mode (default: auto-detect by `<tags>`) |
+| `priority` | string            | no       | `"high"`, `"normal"`, or `"low"`                   |
+| `headers`  | object            | no       | Custom email headers (e.g. `{"X-Tag": "promo"}`)  |
 
-**Example request:**
+**Minimal request:**
 
 ```bash
 curl -X POST http://localhost:8080/send \
@@ -278,8 +285,26 @@ curl -X POST http://localhost:8080/send \
   -H "X-Api-Key: a1b2c3d4e5f6..." \
   -d '{
     "to": "recipient@example.com",
+    "subject": "Hello",
+    "body": "Plain text email"
+  }'
+```
+
+**Extended request:**
+
+```bash
+curl -X POST http://localhost:8080/send \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: a1b2c3d4e5f6..." \
+  -d '{
+    "to": ["user1@example.com", "user2@example.com"],
+    "cc": ["manager@example.com"],
+    "bcc": ["archive@example.com"],
+    "replyTo": "support@example.com",
     "subject": "Monthly Report",
-    "body": "<h1>Report</h1><p>See attached details.</p>"
+    "body": "<h1>Report</h1><p>See details below.</p>",
+    "priority": "high",
+    "headers": {"X-Campaign": "march-2026"}
   }'
 ```
 
@@ -332,7 +357,10 @@ curl http://localhost:8080/logs \
   "logs": [
     {
       "id": 12,
-      "to_address": "recipient@example.com",
+      "to_address": ["user1@example.com", "user2@example.com"],
+      "cc": ["manager@example.com"],
+      "reply_to": "support@example.com",
+      "priority": "high",
       "subject": "Monthly Report",
       "status": "sent",
       "error": null,
@@ -340,7 +368,7 @@ curl http://localhost:8080/logs \
     },
     {
       "id": 11,
-      "to_address": "bad-address@nowhere.invalid",
+      "to_address": ["bad-address@nowhere.invalid"],
       "subject": "Test",
       "status": "failed",
       "error": "Connection refused",
