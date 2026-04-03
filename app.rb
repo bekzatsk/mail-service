@@ -47,6 +47,15 @@ class App < Sinatra::Base
 
   # ── Routes: Client config (master key required) ────────────────────
 
+  # Test SMTP connection without saving
+  post '/config/test' do
+    status_code, headers, body = config_handler.test(request)
+    status status_code
+    headers.each { |k, v| response[k] = v }
+    body.first
+  end
+
+  # Register new client SMTP config
   post '/config' do
     status_code, headers, body = config_handler.call(request)
     status status_code

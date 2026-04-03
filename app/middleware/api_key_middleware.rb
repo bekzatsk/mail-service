@@ -7,7 +7,8 @@ module Middleware
     # Routes that require the MASTER_API_KEY
     MASTER_ROUTES = [
       { method: 'POST', path: '/organizations' },
-      { method: 'POST', path: '/config' }
+      { method: 'POST', path: '/config' },
+      { method: 'POST', path: '/config/test' }
     ].freeze
 
     # Routes that are fully public (no key needed)

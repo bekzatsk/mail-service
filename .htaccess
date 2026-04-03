@@ -1,10 +1,1 @@
-PassengerEnabled on
-PassengerAppType rack
-PassengerStartupFile config.ru
-PassengerRuby /home/%USER%/rubies/ruby-3.x/bin/ruby
-PassengerAppRoot /home/%USER%/mail-service
-
-# Force all requests through Passenger
-RewriteEngine On
-RewriteCond %{REQUEST_FILENAME} !-f
-RewriteRule ^(.*)$ config.ru [QSA,L]
+# Plesk manages Passenger automatically — no Passenger directives needed here

@@ -138,6 +138,55 @@ curl http://localhost:8080/organizations/1
 
 ---
 
+### POST /config/test
+
+Test SMTP connection and authentication without saving anything. Useful for validating credentials before registering a client.
+
+**Auth:** Master key (`X-Api-Key: MASTER_API_KEY`)
+
+**Request body:**
+
+| Field       | Type   | Required | Description                  |
+|-------------|--------|----------|------------------------------|
+| `smtp_host` | string | yes      | SMTP server hostname         |
+| `smtp_port` | int    | yes      | SMTP server port (465 or 587)|
+| `smtp_user` | string | yes      | SMTP username                |
+| `smtp_pass` | string | yes      | SMTP password                |
+
+**Example request:**
+
+```bash
+curl -X POST http://localhost:8080/config/test \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: YOUR_MASTER_KEY" \
+  -d '{
+    "smtp_host": "smtp.mail.ru",
+    "smtp_port": 465,
+    "smtp_user": "noreply@innlab.kz",
+    "smtp_pass": "password123"
+  }'
+```
+
+**Success response** — `200 OK`:
+
+```json
+{
+  "success": true,
+  "message": "SMTP connection successful"
+}
+```
+
+**Failure response** — `200 OK` (not 500, because this is a test result, not a server error):
+
+```json
+{
+  "success": false,
+  "message": "Authentication failed: 535 5.7.8 Error: authentication failed"
+}
+```
+
+---
+
 ### POST /config
 
 Register a new client SMTP configuration under an organization. Returns a unique API key.
@@ -146,14 +195,15 @@ Register a new client SMTP configuration under an organization. Returns a unique
 
 **Request body:**
 
-| Field              | Type   | Required | Description                     |
-|--------------------|--------|----------|---------------------------------|
-| `organization_id`  | int    | yes      | ID of the parent organization   |
-| `smtp_host`        | string | yes      | SMTP server hostname            |
-| `smtp_port`        | int    | yes      | SMTP server port (465 or 587)   |
-| `smtp_user`        | string | yes      | SMTP username                   |
-| `smtp_pass`        | string | yes      | SMTP password (stored encrypted)|
-| `from_address`     | string | yes      | Sender email address            |
+| Field              | Type    | Required | Description                                    |
+|--------------------|---------|----------|------------------------------------------------|
+| `organization_id`  | int     | yes      | ID of the parent organization                  |
+| `smtp_host`        | string  | yes      | SMTP server hostname                           |
+| `smtp_port`        | int     | yes      | SMTP server port (465 or 587)                  |
+| `smtp_user`        | string  | yes      | SMTP username                                  |
+| `smtp_pass`        | string  | yes      | SMTP password (stored encrypted)               |
+| `from_address`     | string  | yes      | Sender email address                           |
+| `test_before_save` | boolean | no       | If `true`, test SMTP before saving (default: false) |
 
 **Example request:**
 
@@ -167,7 +217,8 @@ curl -X POST http://localhost:8080/config \
     "smtp_port": 587,
     "smtp_user": "you@gmail.com",
     "smtp_pass": "your-app-password",
-    "from_address": "you@gmail.com"
+    "from_address": "you@gmail.com",
+    "test_before_save": true
   }'
 ```
 
@@ -181,6 +232,15 @@ curl -X POST http://localhost:8080/config \
 ```
 
 **Error responses:**
+
+`400` — SMTP test failed (only when `test_before_save: true`):
+
+```json
+{
+  "error": "SMTP connection test failed",
+  "details": "Authentication failed for smtp.gmail.com:587"
+}
+```
 
 `400` — missing fields:
 
