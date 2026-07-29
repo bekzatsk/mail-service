@@ -42,6 +42,17 @@ Sinatra + Rack microservice. Single entry point `config.ru` loads `.env`, runs `
 
 `organizations 1—N clients 1—N mail_logs`. The org is the security boundary for `/logs`: any client key in an org sees all logs across all clients in that org (see `MailHandler#logs` join). `mail_logs.to_address`, `cc`, `bcc` are JSON-encoded arrays stored as TEXT — read via `parse_json_field`.
 
+Telegram tables (migration 003) hang off `clients`, not `organizations`: `clients 1—N client_telegram_bots 1—N {telegram_chats, telegram_commands, telegram_messages}`, plus `telegram_bot_state` (1:1 with bot, stores `last_update_id` for resume). `client_telegram_bots.bot_token` is AES-256-CBC encrypted via the same `EncryptionService` as `clients.smtp_pass`. Cross-client isolation for `/telegram/*` is per-client (not per-org) — every query filters by `client['id']` from `X-Api-Key`.
+
+### Telegram subsystem
+
+- `Services::TelegramService` — thin Net::HTTP wrapper over `https://api.telegram.org/bot<TOKEN>/<method>`. Raises `ApiError` / `ConflictError` (409); never stores state.
+- `Services::TelegramBotListener` — one instance per bot, runs `getUpdates` long-poll loop in its own thread. Reads token via `EncryptionService.decrypt`, persists `last_update_id` to `telegram_bot_state` after each update, writes `last_seen` / `last_error` to `client_telegram_bots`. Slash-commands: matched against `telegram_commands`, POSTed to `handler_url` with `X-Handler-Secret`, reply JSON `{text, parseMode}` is sent back to the chat.
+- `Services::TelegramBotSupervisor` — singleton thread manager (`instance.boot!` / `start(bot_id)` / `stop(bot_id)` / `restart(bot_id)` / `shutdown!`). `boot!` runs from `config.ru` after migrations; installs `at_exit` + `Signal.trap(TERM/INT)` for graceful shutdown. Handlers call `start`/`stop`/`restart` after successful DB writes.
+- `Services::TelegramCommandSync.sync!(bot_id)` — pushes current `is_enabled = TRUE` commands for a bot via `setMyCommands` (or `deleteMyCommands` if empty). Called automatically by command POST/PATCH/DELETE; failures are warned, not raised.
+
+Listeners are in-process threads — production deploys must keep workers alive (Puma OK; Passenger needs `passenger_min_instances ≥ 1`). Kill switch: `TELEGRAM_ENABLED=false` skips supervisor boot entirely.
+
 ### API key conventions
 
 - Master key: env var, compared constant-time, used for admin endpoints.

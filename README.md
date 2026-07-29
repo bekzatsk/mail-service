@@ -107,6 +107,10 @@ nano .env            # set DB credentials and keys
 touch tmp/restart.txt
 ```
 
+> **Background threads (Telegram listeners).** The Telegram gateway runs one long-poll thread per enabled bot inside the app process. Production must keep at least one worker alive between requests:
+> - Puma — works out of the box.
+> - Passenger — set `passenger_min_instances ≥ 1` and disable idle shutdown (`passenger_pool_idle_time 0` if you can), otherwise Telegram listeners die between requests. Set `TELEGRAM_ENABLED=false` to disable the gateway entirely on hosts that can't keep workers alive.
+
 ## Authentication
 
 The service uses two types of API keys via the `X-Api-Key` header:

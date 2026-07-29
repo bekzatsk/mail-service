@@ -416,3 +416,179 @@ Each organization can have multiple clients (SMTP configs). Each client generate
 - SMTP passwords are encrypted with AES-256-CBC (OpenSSL) before being stored in the database and decrypted only at send time.
 - Each `/send` call is logged regardless of outcome — check `/logs` to audit delivery status.
 - The `/logs` endpoint returns logs for all clients within the same organization, not just the authenticating client.
+
+---
+
+## Telegram
+
+The Telegram gateway lets a client register one or more Telegram bots and use them to send/receive messages and dispatch slash-commands to client-owned handler URLs. All `/telegram/*` endpoints require a **client key**.
+
+### Model
+
+- `client_telegram_bots` — one row per bot (token AES-256-CBC encrypted, identified by `name` like `main`/`alerts`).
+- `telegram_chats` — chats authorized for a bot.
+- `telegram_commands` — commands the bot exposes via `setMyCommands`. Each command has an optional `handlerUrl` (POSTed when a Telegram user invokes the command) and `handlerSecret` (sent as `X-Handler-Secret`).
+- `telegram_messages` — inbound/outbound audit log.
+- `telegram_bot_state` — per-bot `last_update_id` so listeners resume cleanly after restart.
+
+A long-poll listener runs in-process (one Ruby thread per enabled bot). Restart the process and listeners resume from `last_update_id`.
+
+### Bot resolution
+
+For endpoints that act on a bot (`/telegram/messages`, `/telegram/chats`, `/telegram/commands`), resolution order is:
+
+1. `botId` (numeric, scoped to your client) →
+2. `botName` (string) →
+3. the bot flagged `is_default = true` for your client.
+
+### POST /telegram/bots/test
+
+Validate a bot token via `getMe` without saving.
+
+```json
+{ "botToken": "123:abc" }
+```
+
+Response:
+
+```json
+{ "success": true, "username": "my_bot", "botId": 123456789 }
+```
+
+### POST /telegram/bots
+
+Register a new bot. Token is validated via `getMe`, encrypted, and the listener thread is started.
+
+```json
+{ "name": "main", "botToken": "123:abc", "isDefault": true }
+```
+
+`201 Created` — returns `{ "bot": { ...full bot fields without token... } }`.
+
+Errors: `400` (validation), `409` (`name` already exists for this client).
+
+### GET /telegram/bots / GET /telegram/bots/:id
+
+List or fetch your bots. Tokens are never returned.
+
+### PATCH /telegram/bots/:id
+
+Any subset of `{ name, isEnabled, isDefault, botToken }`. If `botToken` changes, it's revalidated via `getMe`; the listener is restarted. If `isEnabled` flips, the listener is started/stopped accordingly.
+
+### DELETE /telegram/bots/:id
+
+Stops the listener and cascade-deletes chats/commands/messages for this bot.
+
+### POST /telegram/bots/:id/sync-commands
+
+Force a `setMyCommands` call to Telegram. Usually unnecessary — `POST/PATCH/DELETE /telegram/commands` does this automatically.
+
+### POST /telegram/messages
+
+Send a message. `botId` or `botName` optional (default bot used otherwise).
+
+```json
+{
+  "botName": "main",
+  "chatId": 217860003,
+  "text": "Channel X failed",
+  "parseMode": "Markdown",
+  "replyToMessageId": null,
+  "disableNotification": false
+}
+```
+
+Response:
+
+```json
+{ "id": 42, "telegramMessageId": 555, "status": "sent" }
+```
+
+Failures are logged to `telegram_messages` with `status: "failed"` and return `500`.
+
+### GET /telegram/messages
+
+Filter via query params: `botId`, `chatId`, `direction` (`inbound`|`outbound`), `limit` (max 500, default 100), `offset`.
+
+### GET /telegram/messages/:id
+
+Single message (scoped to your client).
+
+### POST /telegram/chats
+
+Authorize a chat for a bot. `botId` or `botName` optional.
+
+```json
+{ "botName": "main", "chatId": 217860003, "chatType": "private", "title": "DM with admin" }
+```
+
+`chatType` ∈ `private | group | supergroup | channel`. Returns `201` for new, `200` for already-existing pair.
+
+### GET /telegram/chats
+
+`?botId=...` to filter, otherwise all chats across your client's bots.
+
+### DELETE /telegram/chats/:id
+
+Delete by row PK (not Telegram chat_id).
+
+### POST /telegram/commands
+
+Register a command. `botId` or `botName` optional.
+
+```json
+{
+  "botName": "main",
+  "command": "status",
+  "description": "Show recorder status",
+  "handlerUrl": "https://recorder.example.com/telegram/handlers/status",
+  "handlerSecret": "deadbeef..."
+}
+```
+
+`command` must match `[a-z0-9_]{1,32}` (no leading slash). Auto-syncs the bot's menu via `setMyCommands`. Returns `201`.
+
+### Handler protocol
+
+When a Telegram user sends `/status all`, the listener POSTs to `handlerUrl`:
+
+```json
+{
+  "chatId": 217860003,
+  "userId": 17,
+  "username": "alice",
+  "command": "status",
+  "args": "all",
+  "messageId": 42,
+  "botId": 1,
+  "botName": "main"
+}
+```
+
+With header `X-Handler-Secret: <handlerSecret>` (omitted if no secret). Timeout `TELEGRAM_HANDLER_TIMEOUT_SECONDS` (default 10s).
+
+The handler should respond JSON:
+
+```json
+{ "text": "Recorder: OK", "parseMode": "Markdown" }
+```
+
+The text is sent back to the chat as a reply to the original message. Empty or missing `text` → no reply sent.
+
+### GET /telegram/commands
+
+`?botId=...` to filter.
+
+### PATCH /telegram/commands/:id
+
+Any subset of `{ description, handlerUrl, handlerSecret, isEnabled }`. Re-syncs the menu.
+
+### DELETE /telegram/commands/:id
+
+Removes the command + re-syncs the menu.
+
+### Operational notes
+
+- Listeners are in-process threads. Production must support background threads outside of request handling: Puma OK; on Passenger set `passenger_min_instances ≥ 1` so a worker stays alive.
+- Two clients can register the same bot token. Telegram only delivers `getUpdates` to one poller at a time — the other listener will receive HTTP `409 Conflict`, store `last_error`, sleep 60s, retry. This is a Telegram protocol constraint, not a gateway bug.
+- Cross-client isolation: every query is scoped by `client_id` (derived from `X-Api-Key`). Client A cannot read/mutate client B's bots, chats, commands, or messages.
