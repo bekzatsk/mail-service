@@ -17,8 +17,12 @@ variables:
   # Plesk shared host. SSH does not answer, so FTPS is the only transport —
   # same arrangement as the other project on this host, which is why the
   # credentials are the shared org-scoped FLUX_FTP_USER / FLUX_FTP_PASS rather
-  # than anything named for this service. Overridable by a secret of the same
-  # name, since secrets outrank this block.
+  # than anything named for this service.
+  #
+  # This is a fallback only: a secret of the same name outranks this block, and
+  # FLUX_FTP_HOST is defined as one. Note that a *protected* secret arrives as
+  # an empty string on a non-protected ref and still overrides — which is why
+  # the job guards this value rather than trusting the default below.
   FLUX_FTP_HOST: "185.116.195.70"
   # Directory under the FTP account's root. On this Plesk host that is the
   # domain name itself, with no httpdocs level.
@@ -91,6 +95,7 @@ deploy-ftps:
     # this ref — look identical here and the message has to name both.
     - 'test -n "${FLUX_FTP_USER:-}" || { echo "FLUX_FTP_USER is empty. Define it under CI/CD -> Secrets, and if it is marked protected, run this from a protected ref."; exit 1; }'
     - 'test -n "${FLUX_FTP_PASS:-}" || { echo "FLUX_FTP_PASS is empty. Define it under CI/CD -> Secrets, and if it is marked protected, run this from a protected ref."; exit 1; }'
+    - 'test -n "${FLUX_FTP_HOST:-}" || { echo "FLUX_FTP_HOST is empty. It is defined as a secret, and a protected secret overrides the fallback in this file with an empty string on a non-protected ref."; exit 1; }'
     - 'test -n "${MAIL_SITE_URL:-}" || { echo "MAIL_SITE_URL is not set. Set it to where the service answers, e.g. https://mail.example.com, so the deploy can verify itself."; exit 1; }'
     - apk add --no-cache lftp curl > /dev/null
 
