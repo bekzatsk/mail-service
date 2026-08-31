@@ -7,15 +7,30 @@ require_relative 'app/handlers/organization_handler'
 require_relative 'app/handlers/config_handler'
 require_relative 'app/handlers/mail_handler'
 require_relative 'app/handlers/telegram_handler'
+require_relative 'app/handlers/admin_handler'
 
 class App < Sinatra::Base
+  UI_ROOT = File.join(__dir__, 'public', 'ui')
+
   configure do
     set :show_exceptions, false
     set :raise_errors, false
+    set :static, true
+    set :public_folder, File.join(__dir__, 'public')
   end
 
   before do
     content_type :json
+  end
+
+  helpers do
+    # Handlers return a Rack triple; unpack it onto the Sinatra response.
+    def emit(triple)
+      status_code, headers, body = triple
+      status status_code
+      headers.each { |k, v| response[k] = v }
+      body.first
+    end
   end
 
   # ── Handlers ────────────────────────────────────────────────────────
@@ -23,206 +38,174 @@ class App < Sinatra::Base
   config_handler       = Handlers::ConfigHandler.new
   mail_handler         = Handlers::MailHandler.new
   telegram_handler     = Handlers::TelegramHandler.new
+  admin_handler        = Handlers::AdminHandler.new
+
+  # ── Routes: Admin UI (static, served from public/ui) ────────────────
+
+  get '/' do
+    redirect '/ui/'
+  end
+
+  %w[/ui /ui/].each do |ui_path|
+    get ui_path do
+      send_file File.join(UI_ROOT, 'index.html'), type: :html
+    end
+  end
 
   # ── Routes: Organizations (master key for POST, public for GET) ────
 
   post '/organizations' do
-    status_code, headers, body = organization_handler.create(request)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit organization_handler.create(request)
   end
 
   get '/organizations' do
-    status_code, headers, body = organization_handler.list
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit organization_handler.list
   end
 
   get '/organizations/:id' do
-    status_code, headers, body = organization_handler.show(params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit organization_handler.show(params['id'].to_i)
   end
 
   # ── Routes: Client config (master key required) ────────────────────
 
   # Test SMTP connection without saving
   post '/config/test' do
-    status_code, headers, body = config_handler.test(request)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit config_handler.test(request)
   end
 
   # Register new client SMTP config
   post '/config' do
-    status_code, headers, body = config_handler.call(request)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit config_handler.call(request)
+  end
+
+  # ── Routes: Admin panel backend (master key required) ──────────────
+
+  get '/admin/stats' do
+    emit admin_handler.stats
+  end
+
+  get '/admin/organizations' do
+    emit admin_handler.list_organizations
+  end
+
+  patch '/admin/organizations/:id' do
+    emit admin_handler.update_organization(request, params['id'].to_i)
+  end
+
+  delete '/admin/organizations/:id' do
+    emit admin_handler.delete_organization(params['id'].to_i)
+  end
+
+  get '/admin/clients' do
+    emit admin_handler.list_clients(request)
+  end
+
+  get '/admin/clients/:id' do
+    emit admin_handler.show_client(params['id'].to_i)
+  end
+
+  patch '/admin/clients/:id' do
+    emit admin_handler.update_client(request, params['id'].to_i)
+  end
+
+  delete '/admin/clients/:id' do
+    emit admin_handler.delete_client(params['id'].to_i)
+  end
+
+  post '/admin/clients/:id/rotate-key' do
+    emit admin_handler.rotate_client_key(params['id'].to_i)
+  end
+
+  post '/admin/clients/:id/test' do
+    emit admin_handler.test_client(params['id'].to_i)
+  end
+
+  get '/admin/logs' do
+    emit admin_handler.logs(request)
   end
 
   # ── Routes: Mail (protected — X-Api-Key via middleware) ────────────
 
   post '/send' do
-    client = env['mail_service.client']
-    status_code, headers, body = mail_handler.send_mail(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit mail_handler.send_mail(request, env['mail_service.client'])
   end
 
   get '/logs' do
-    client = env['mail_service.client']
-    status_code, headers, body = mail_handler.logs(client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit mail_handler.logs(env['mail_service.client'])
   end
 
   # ── Routes: Telegram (client key required via middleware) ──────────
 
   # Bots
   post '/telegram/bots/test' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.test_bot(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.test_bot(request, env['mail_service.client'])
   end
 
   post '/telegram/bots' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.create_bot(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.create_bot(request, env['mail_service.client'])
   end
 
   get '/telegram/bots' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.list_bots(client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.list_bots(env['mail_service.client'])
   end
 
   get '/telegram/bots/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.show_bot(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.show_bot(env['mail_service.client'], params['id'].to_i)
   end
 
   patch '/telegram/bots/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.update_bot(request, client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.update_bot(request, env['mail_service.client'], params['id'].to_i)
   end
 
   delete '/telegram/bots/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.delete_bot(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.delete_bot(env['mail_service.client'], params['id'].to_i)
   end
 
   post '/telegram/bots/:id/sync-commands' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.sync_commands(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.sync_commands(env['mail_service.client'], params['id'].to_i)
   end
 
   # Messages
   post '/telegram/messages' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.send_message(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.send_message(request, env['mail_service.client'])
   end
 
   get '/telegram/messages' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.list_messages(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.list_messages(request, env['mail_service.client'])
   end
 
   get '/telegram/messages/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.show_message(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.show_message(env['mail_service.client'], params['id'].to_i)
   end
 
   # Chats
   post '/telegram/chats' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.create_chat(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.create_chat(request, env['mail_service.client'])
   end
 
   get '/telegram/chats' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.list_chats(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.list_chats(request, env['mail_service.client'])
   end
 
   delete '/telegram/chats/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.delete_chat(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.delete_chat(env['mail_service.client'], params['id'].to_i)
   end
 
   # Commands
   post '/telegram/commands' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.create_command(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.create_command(request, env['mail_service.client'])
   end
 
   get '/telegram/commands' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.list_commands(request, client)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.list_commands(request, env['mail_service.client'])
   end
 
   patch '/telegram/commands/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.update_command(request, client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.update_command(request, env['mail_service.client'], params['id'].to_i)
   end
 
   delete '/telegram/commands/:id' do
-    client = env['mail_service.client']
-    status_code, headers, body = telegram_handler.delete_command(client, params['id'].to_i)
-    status status_code
-    headers.each { |k, v| response[k] = v }
-    body.first
+    emit telegram_handler.delete_command(env['mail_service.client'], params['id'].to_i)
   end
 
   # 404 fallback

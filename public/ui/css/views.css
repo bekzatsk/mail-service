@@ -1,0 +1,124 @@
+/* ── Lock screen ─────────────────────────────────────────────────── */
+
+.lock {
+  position: relative;
+  z-index: 1;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+}
+.lock__panel {
+  width: min(420px, 100%);
+  display: grid;
+  gap: var(--space-5);
+}
+.lock__mark {
+  font-family: var(--font-mono);
+  font-size: var(--text-display);
+  line-height: 0.9;
+  letter-spacing: -0.05em;
+  color: var(--c-text);
+}
+.lock__mark span { color: var(--c-accent); }
+.lock__note { color: var(--c-text-dim); font-size: var(--text-sm); max-width: 38ch; }
+
+/* ── Client scope switcher (header) ──────────────────────────────── */
+
+.scope {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px 3px 3px var(--space-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-line);
+  border-radius: 99px;
+  font-size: var(--text-sm);
+}
+.scope__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-caps);
+  color: var(--c-text-dim);
+}
+.scope .select {
+  min-height: 26px;
+  padding: 2px 1.75rem 2px 0.5rem;
+  border-radius: 99px;
+  background-color: var(--c-raised);
+  font-size: var(--text-xs);
+  max-width: 240px;
+}
+
+/* ── Dashboard ───────────────────────────────────────────────────── */
+
+.hero {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-6) 0 var(--space-7);
+}
+.hero__title {
+  font-size: var(--text-display);
+  line-height: 0.98;
+  letter-spacing: -0.035em;
+  font-weight: 650;
+  max-width: 16ch;
+}
+.hero__title em { font-style: normal; color: var(--c-accent); }
+.hero__meta { display: flex; gap: var(--space-4); flex-wrap: wrap; color: var(--c-text-dim); font-size: var(--text-sm); }
+
+.split { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: var(--space-5); align-items: start; }
+.split > * { min-width: 0; }
+@media (max-width: 980px) { .split { grid-template-columns: 1fr; } }
+
+/* Health bar: one horizontal read of sent vs failed */
+.bar { display: flex; height: 6px; border-radius: 99px; overflow: hidden; background: var(--c-void); border: 1px solid var(--c-line-soft); }
+.bar__seg { height: 100%; transition: width var(--dur-slow) var(--ease-out); }
+.bar__seg--ok  { background: var(--c-accent); }
+.bar__seg--bad { background: var(--c-danger); }
+.bar-legend { display: flex; gap: var(--space-4); margin-top: var(--space-3); font-size: var(--text-xs); color: var(--c-text-dim); }
+
+/* ── Organizations — editorial list, not a card grid ─────────────── */
+
+.orglist { border-top: 1px solid var(--c-line-soft); }
+.orgrow {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--c-line-soft);
+  cursor: pointer;
+  transition: background var(--dur-fast), padding-left var(--dur-fast);
+}
+.orgrow:hover { background: var(--c-surface); padding-left: var(--space-4); }
+.orgrow__idx { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--c-text-dim); }
+.orgrow__name { font-size: var(--text-md); font-weight: 600; letter-spacing: -0.01em; }
+.orgrow__slug { font-family: var(--font-mono); font-size: var(--text-xs); color: var(--c-text-dim); }
+.orgrow__stats { display: flex; gap: var(--space-4); font-size: var(--text-xs); color: var(--c-text-dim); }
+.orgrow__stats b { color: var(--c-text-mid); font-family: var(--font-mono); font-weight: 600; }
+.orgrow__actions { display: flex; gap: var(--space-1); opacity: 0.25; transition: opacity var(--dur-fast); }
+.orgrow:hover .orgrow__actions, .orgrow:focus-within .orgrow__actions { opacity: 1; }
+@media (max-width: 760px) {
+  .orgrow { grid-template-columns: 2rem minmax(0, 1fr) auto; }
+  .orgrow__stats { display: none; }
+}
+
+/* ── Message thread (telegram) ───────────────────────────────────── */
+
+.thread { display: grid; gap: var(--space-3); }
+.msg {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius);
+  border: 1px solid var(--c-line-soft);
+  background: var(--c-surface);
+  max-width: 78%;
+  font-size: var(--text-sm);
+}
+.msg--outbound { justify-self: end; border-color: var(--c-accent-dim); background: #101a14; }
+.msg--inbound  { justify-self: start; }
+.msg__meta { display: flex; gap: var(--space-3); font-size: var(--text-xs); color: var(--c-text-dim); font-family: var(--font-mono); }
+.msg__text { white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 640px) { .msg { max-width: 100%; } }

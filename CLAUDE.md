@@ -10,9 +10,19 @@ bundle exec puma config.ru -p 8080          # run dev server
 bundle exec rackup config.ru -p 8080        # alternative dev server
 touch tmp/restart.txt                       # restart under Passenger (prod)
 bash setup.sh                               # cPanel/Passenger first-time setup
+
+# Checks — these are exactly what CI runs, and all four run without a database
+ruby test/middleware_routes_test.rb         # route/key authorization matrix
+sh script/check-ui-modules.sh               # console modules parse, no unsafe sinks
+sh script/check-secrets.sh                  # no credential in the tracked tree
+node test/ui_smoke_test.mjs                 # console in a browser (needs playwright)
+
+node test/support/mock_api.mjs 8117          # console against fixtures, no DB
 ```
 
-No test suite exists. No linter configured. Migrations run automatically on boot — never invoke them manually.
+No linter configured. Migrations run automatically on boot — never invoke them manually.
+
+The smoke test needs Playwright, which is not vendored: `npm i --no-save playwright@1.62.1 && npx playwright install chromium`. `node_modules/` is gitignored.
 
 ## Architecture
 
@@ -21,10 +31,10 @@ Sinatra + Rack microservice. Single entry point `config.ru` loads `.env`, runs `
 ### Request lifecycle
 
 1. `ApiKeyMiddleware` (`app/middleware/api_key_middleware.rb`) classifies the route:
-   - `PUBLIC_ROUTES` — GET `/organizations*` pass through.
-   - `MASTER_ROUTES` — POST `/organizations`, `/config`, `/config/test` require `X-Api-Key == MASTER_API_KEY` (constant-time compare).
+   - `PUBLIC_PATHS` / `PUBLIC_ROUTES` — GET `/`, GET `/ui*`, GET `/favicon*` pass through. These are the console's static assets only; **no API endpoint is public**.
+   - `MASTER_ROUTES` (exact) — POST `/organizations`, `/config`, `/config/test`; `MASTER_PREFIXES` — everything under `/admin` plus GET `/organizations*`. Both require `X-Api-Key == MASTER_API_KEY` (constant-time compare). A *client* key on these routes gets 403, not a fallthrough.
    - Anything else requires a client API key; the matching `clients` row + joined `organizations` data is injected as `env['mail_service.client']`.
-2. `App` (Sinatra) routes delegate to handler instances. Each handler method returns a Rack triple `[status, headers, [body]]`; Sinatra routes unpack and re-emit it. Keep this triple shape when adding handlers.
+2. `App` (Sinatra) routes delegate to handler instances. Each handler method returns a Rack triple `[status, headers, [body]]`; the `emit` helper unpacks it onto the Sinatra response. Keep this triple shape when adding handlers.
 3. Handlers call `Services::*` for DB, encryption, SMTP test, and mail delivery.
 
 ### Layers
@@ -37,6 +47,7 @@ Sinatra + Rack microservice. Single entry point `config.ru` loads `.env`, runs `
   - `SmtpTestService` — `Net::SMTP` connect+auth with a 10s timeout, returns `{success:, message:}`. Used both by `/config/test` and by `/config` when `test_before_save: true`.
   - `Migrator` — runs every boot. Creates DB if missing, tracks executed files in `schema_migrations`, splits each SQL file on `;` and executes statements one-by-one. **Consequence: never use `;` inside a single statement (no stored procs, no triggers with bodies).** Add a new file `db/migrations/NNN_*.sql` and it runs on next start.
 - `app/middleware/` — Rack middleware only.
+- `public/ui/` — the admin console. Static ES modules, no build step (see "Admin console" below).
 
 ### Data model
 
@@ -53,10 +64,41 @@ Telegram tables (migration 003) hang off `clients`, not `organizations`: `client
 
 Listeners are in-process threads — production deploys must keep workers alive (Puma OK; Passenger needs `passenger_min_instances ≥ 1`). Kill switch: `TELEGRAM_ENABLED=false` skips supervisor boot entirely.
 
+### Admin console
+
+`/ui/` serves a single-page operator console from `public/ui` (Sinatra static, `set :public_folder` → `public`; `GET /` redirects to `/ui/`). Sinatra's `static!` runs before the `before` filter, so the global `content_type :json` never touches the assets — but the explicit `get '/ui'` route must pass `type: :html` to `send_file` for that reason.
+
+- Plain ES modules loaded via `<script type="module">`. **No build step, no Node** — this is deliberate, the production target is shared cPanel hosting.
+- Routing is hash-based (`#/clients`), so deep links survive a reload without a server rewrite.
+- `public/ui/js/ui.js` builds DOM through `el()` and only ever assigns `textContent`. Never introduce `innerHTML` there — API strings flow straight into these nodes.
+- `public/ui/js/store.js` owns state as a frozen object plus subscribers; `refresh()` reloads orgs, clients and stats together.
+- Two credential scopes exist in `api.js`: `admin(masterKey)` for `/admin/*`, and `client(apiKey)` for `/send` and `/telegram/*`. The console gets client keys from `GET /admin/clients` and uses the one picked in the header "Scope" switcher.
+- Nav highlight and breadcrumb call `parseHash()` directly rather than `currentRoute()`; their `hashchange` listeners are registered before the router's, so the cached route would otherwise lag one navigation behind.
+
+`Handlers::AdminHandler` (`app/handlers/admin_handler.rb`) backs it: stats, organization update/delete, client list/show/update/delete, key rotation, stored-credential SMTP test, and filtered mail logs. It adds no tables — no migration was needed.
+
+### CI/CD
+
+`.flux-ci.yml` drives [Flux CI](https://flux.innlab.kz/docs/pipeline) — GitLab-shaped syntax, but a small subset of it. Keys Flux does not implement (`before_script`, `rules`, `only`, `extends`, `cache`, `services`, `retry`) parse fine and do nothing, so a config written from GitLab habits saves cleanly and silently misbehaves.
+
+Three stages: **verify** (`ruby-syntax`, `console-modules`, `secret-scan`), **test** (`route-auth`, `console-smoke`), **deploy** (`deploy-ftps`, `when: manual`).
+
+Things about this pipeline that are load-bearing:
+
+- **No `changes:` anywhere.** A skipped job skips everything that `needs` it, and `deploy-ftps` needs all three checks — path-filtering any of them would silently skip the deploy instead of the check.
+- **All lines of a job run in one shell** with `set -e`. `cd` persists between lines; each line is not its own step. That is why the lftp invocation is a single folded (`>`) block.
+- **A YAML plain scalar cannot contain `": "` or start with `": "`.** `echo "NOTE: ..."` must be single-quoted or the save fails with a parse error pointing at that line.
+- **`find -exec ruby -c` exits 0 even when a file fails to parse**, which would take `ruby-syntax` green on a syntax error. It loops with `|| exit 1` instead.
+- **The deploy never passes `--delete`.** The host holds `.env`, `vendor/bundle` and `tmp/`, none of which are in this repo; a pruning mirror would take the service down. It also means a file deleted from the repo is not deleted from the host.
+- **Gems are not shipped.** FTPS cannot run `bundle install`; a Gemfile change needs a manual bundle on the host.
+- The deploy gates on the live service — `/organizations` must answer 401 and `/ui/` must serve the console — because a mirror that uploaded fine but left the old process running is still a failed deploy.
+
+Secrets, set in Flux under CI/CD → Secrets and marked protected: `MAIL_FTP_USER`, `MAIL_FTP_PASS`. Plain variables in the file: `MAIL_FTP_HOST`, `MAIL_REMOTE_DIR`, `MAIL_SITE_URL` (must be set, the deploy refuses without it).
+
 ### API key conventions
 
 - Master key: env var, compared constant-time, used for admin endpoints.
-- Client key: `SecureRandom.hex(32)`, stored plaintext in `clients.api_key` (the column has `UNIQUE` index — middleware does a single indexed lookup).
+- Client key: `SecureRandom.hex(32)`, stored plaintext in `clients.api_key` (the column has `UNIQUE` index — middleware does a single indexed lookup). `GET /admin/clients` returns it; that is intentional, the console needs it to reach the client-scoped endpoints.
 - Header is always `X-Api-Key`. Missing → 401, invalid → 403.
 
 ## Conventions

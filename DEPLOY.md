@@ -142,3 +142,20 @@ Make sure `DB_HOST=localhost` (not `127.0.0.1`) on shared hosting — some cPane
 chmod -R 755 ~/mail-service
 chmod 600 ~/mail-service/.env
 ```
+
+## Admin console
+
+After the app boots, the operator console is at `https://your-host/ui/` (`/` redirects there). Unlock it with the `MASTER_API_KEY` from `.env`.
+
+The console is static HTML/CSS/JS under `public/ui` — nothing to build or compile. Two things to check on a Passenger host:
+
+- If Passenger's document root is `public/`, the web server serves `/ui/*` directly and never wakes Ruby. That is fine and preferred.
+- If it is the app root instead, Sinatra serves the assets itself (`set :static, true`). Also fine, but make sure `.env`, `app/` and `db/` are **not** reachable over HTTP in that setup.
+
+Serve the whole thing over HTTPS: the console sends the master key on every request, and `GET /admin/clients` returns client API keys in plaintext.
+
+## Automated deploys
+
+Manual FTPS/SSH deploys are the fallback. The normal path is the `deploy-ftps` job in [`.flux-ci.yml`](.flux-ci.yml) — see the CI/CD section of [README.md](README.md) for the secrets it needs.
+
+It ships source only. The host still needs the one-time `setup.sh` run (gems into `vendor/bundle`, `.env`, `tmp/`), and a `Gemfile` change still needs a manual `bundle install` there, because FTPS cannot execute anything.
