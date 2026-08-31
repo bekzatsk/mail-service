@@ -93,6 +93,8 @@ Things about this pipeline that are load-bearing:
 - **Gems are not shipped.** FTPS cannot run `bundle install`; a Gemfile change needs a manual bundle on the host.
 - The deploy gates on the live service — `/organizations` must answer 401 and `/ui/` must serve the console — because a mirror that uploaded fine but left the old process running is still a failed deploy.
 
+The deploy target is the directory `mail.innlab.kz` on the shared host — that is where the checkout lives (`config.ru`, `.env`, `vendor/`, `tmp/`). The service answers on `https://email.innlab.kz`, an alias onto the same document root, so the directory name and the site URL differ on purpose. The document root is the application root itself, not `public/`, which is why the Plesk welcome `index.html` still wins at `/` and the console is reached at `/ui/` through Sinatra's static handler.
+
 Credentials are the host-wide org secrets `FLUX_FTP_USER` / `FLUX_FTP_PASS` — one FTP account covers every domain on the Plesk host, so there is no mail-service-specific pair. Plain variables in the file: `FLUX_FTP_HOST`, `MAIL_REMOTE_DIR`, `MAIL_SITE_URL` (must be set somewhere; the deploy refuses without it). A protected secret is an empty string on a non-protected ref, so "is empty" from a guard means either undefined or withheld from this ref.
 
 ### API key conventions

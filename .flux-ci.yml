@@ -24,9 +24,11 @@ variables:
   # an empty string on a non-protected ref and still overrides — which is why
   # the job guards this value rather than trusting the default below.
   FLUX_FTP_HOST: "185.116.195.70"
-  # Directory under the FTP account's root. On this Plesk host that is the
-  # domain name itself, with no httpdocs level.
-  MAIL_REMOTE_DIR: "email.innlab.kz"
+  # Directory under the FTP account's root. On this Plesk host that is a domain
+  # name with no httpdocs level — but not necessarily the domain the service
+  # answers on: email.innlab.kz is an alias pointing at the mail.innlab.kz
+  # document root, which is where the checkout actually lives.
+  MAIL_REMOTE_DIR: "mail.innlab.kz"
   # Where the deployed service answers. The deploy refuses to run without it,
   # because a deploy nobody verified is not a deploy. A secret of the same name
   # overrides this.
