@@ -57,12 +57,23 @@ Telegram tables (migration 003) hang off `clients`, not `organizations`: `client
 
 ### Telegram subsystem
 
+Two transports, chosen per bot by `client_telegram_bots.delivery_mode` (`polling` | `webhook`, migration 004):
+
+- **webhook** — Telegram POSTs to `/telegram/webhook/:bot_id`. That route is in `PUBLIC_ROUTES` because Telegram cannot send our `X-Api-Key`; what authenticates it is `X-Telegram-Bot-Api-Secret-Token`, compared against the per-bot `webhook_secret` with `Services::SecureCompare`. No threads, so it survives Passenger suspending an idle process and cannot duplicate across workers. This is the mode production wants.
+- **polling** — `TelegramBotListener` in a thread, as before. The supervisor only starts threads for bots whose `delivery_mode` is `polling`; running both against one bot earns a 409 from Telegram, which is exactly the failure this split avoids.
+
+`Services::TelegramUpdateProcessor` holds everything that happens *to* an update — log it, match a command, POST to `handler_url`, reply. Both transports call it, so they cannot drift. The transport decides only how an update arrives.
+
+The webhook endpoint answers 200 for anything it accepts, including updates it ignores and updates whose processing raised: a non-2xx makes Telegram redeliver, so a persistent bug would become a retry storm.
+
 - `Services::TelegramService` — thin Net::HTTP wrapper over `https://api.telegram.org/bot<TOKEN>/<method>`. Raises `ApiError` / `ConflictError` (409); never stores state.
 - `Services::TelegramBotListener` — one instance per bot, runs `getUpdates` long-poll loop in its own thread. Reads token via `EncryptionService.decrypt`, persists `last_update_id` to `telegram_bot_state` after each update, writes `last_seen` / `last_error` to `client_telegram_bots`. Slash-commands: matched against `telegram_commands`, POSTed to `handler_url` with `X-Handler-Secret`, reply JSON `{text, parseMode}` is sent back to the chat.
 - `Services::TelegramBotSupervisor` — singleton thread manager (`instance.boot!` / `start(bot_id)` / `stop(bot_id)` / `restart(bot_id)` / `shutdown!`). `boot!` runs from `config.ru` after migrations; installs `at_exit` + `Signal.trap(TERM/INT)` for graceful shutdown. Handlers call `start`/`stop`/`restart` after successful DB writes.
 - `Services::TelegramCommandSync.sync!(bot_id)` — pushes current `is_enabled = TRUE` commands for a bot via `setMyCommands` (or `deleteMyCommands` if empty). Called automatically by command POST/PATCH/DELETE; failures are warned, not raised.
 
-Listeners are in-process threads — production deploys must keep workers alive (Puma OK; Passenger needs `passenger_min_instances ≥ 1`). Kill switch: `TELEGRAM_ENABLED=false` skips supervisor boot entirely.
+Listeners are in-process threads — a bot left on `polling` needs the worker kept alive (Puma OK; Passenger needs `passenger_min_instances ≥ 1`). Webhook bots have no such requirement, which is why they are the answer on Plesk/Passenger. Kill switch: `TELEGRAM_ENABLED=false` skips supervisor boot entirely and does not affect webhook bots.
+
+Registering a webhook needs `PUBLIC_BASE_URL` (https). Without it the handler falls back to `request.base_url`, which is a guess behind a proxy.
 
 ### Admin console
 

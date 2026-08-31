@@ -84,6 +84,17 @@ puts "\nMaster-only — organizations, client config, and the whole admin surfac
   expect(middleware, method, path, MASTER_KEY, 200)
 end
 
+puts "\nTelegram webhook — public by necessity, authenticated by secret token"
+# Telegram cannot send our X-Api-Key. The middleware lets these through and the
+# handler compares X-Telegram-Bot-Api-Secret-Token instead.
+expect(middleware, 'POST', '/telegram/webhook/11', nil, 200)
+expect(middleware, 'POST', '/telegram/webhook/11', 'nonsense', 200)
+# Only POST, and only under that exact prefix. A near-miss must not inherit it.
+expect(middleware, 'GET',    '/telegram/webhook/11', nil, 401)
+expect(middleware, 'DELETE', '/telegram/webhook/11', nil, 401)
+expect(middleware, 'POST',   '/telegram/webhookfoo', nil, 401)
+expect(middleware, 'POST',   '/telegram/webhook',    nil, 401)
+
 puts "\nClient-only — sending and the Telegram gateway"
 [
   ['POST', '/send'],

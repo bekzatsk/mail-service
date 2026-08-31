@@ -97,6 +97,10 @@ export function client(apiKey) {
     deleteBot:     (id) => call(`/telegram/bots/${id}`, { method: 'DELETE' }),
     syncCommands:  (id) => call(`/telegram/bots/${id}/sync-commands`, { method: 'POST' }),
 
+    webhookInfo:    (id) => call(`/telegram/bots/${id}/webhook`),
+    enableWebhook:  (id, body) => call(`/telegram/bots/${id}/webhook`, { method: 'POST', body }),
+    disableWebhook: (id) => call(`/telegram/bots/${id}/webhook`, { method: 'DELETE' }),
+
     chats:         (params) => call(`/telegram/chats${query(params)}`),
     createChat:    (body) => call('/telegram/chats', { method: 'POST', body }),
     deleteChat:    (id) => call(`/telegram/chats/${id}`, { method: 'DELETE' }),

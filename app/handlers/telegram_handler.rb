@@ -1,11 +1,14 @@
 # frozen_string_literal: true
 
 require 'json'
+require 'securerandom'
 require_relative '../services/database'
 require_relative '../services/encryption_service'
 require_relative '../services/telegram_service'
 require_relative '../services/telegram_bot_supervisor'
 require_relative '../services/telegram_command_sync'
+require_relative '../services/telegram_update_processor'
+require_relative '../services/secure_compare'
 
 module Handlers
   class TelegramHandler
@@ -13,6 +16,133 @@ module Handlers
       @encryption   = Services::EncryptionService.new
       @telegram     = Services::TelegramService.new
       @command_sync = Services::TelegramCommandSync.new
+      @processor    = Services::TelegramUpdateProcessor.new
+    end
+
+    # ── Webhook transport ──────────────────────────────────────────────
+
+    # POST /telegram/webhook/:bot_id  — called by Telegram, not by a client.
+    #
+    # Unauthenticated as far as the API-key middleware is concerned: Telegram
+    # cannot send our X-Api-Key. What authenticates the delivery is the secret
+    # token we handed to setWebhook, echoed back in a header and compared in
+    # constant time here.
+    #
+    # Answers 200 for anything it accepts, including updates it decides to
+    # ignore and updates whose processing blew up. A non-2xx makes Telegram
+    # redeliver, so a persistent bug would turn into a retry storm.
+    def receive_webhook(request, bot_id)
+      bot = Services::Database.query(
+        'SELECT * FROM client_telegram_bots WHERE id = ?', [bot_id]
+      ).first
+
+      # Same answer for "no such bot" and "webhook not registered", so the
+      # endpoint cannot be used to enumerate bot ids.
+      return error('Not found', 404) if bot.nil? || blank?(bot['webhook_secret'])
+
+      presented = request.env['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN']
+      unless Services::SecureCompare.call(presented, bot['webhook_secret'])
+        return error('Invalid webhook secret token', 403)
+      end
+
+      # Disabled bots stay registered but do nothing; acknowledge and drop.
+      return json({ ok: true, ignored: 'bot disabled' }) unless truthy?(bot['is_enabled'])
+
+      update = parse_json(request)
+      begin
+        @processor.process(bot, update) unless update.empty?
+        mark_seen(bot['id'], nil)
+      rescue StandardError => e
+        mark_seen(bot['id'], "#{e.class}: #{e.message}")
+        warn "[telegram-webhook:#{bot['id']}] #{e.class}: #{e.message}"
+      end
+
+      json({ ok: true })
+    end
+
+    # POST /telegram/bots/:id/webhook — switch this bot to webhook delivery.
+    def enable_webhook(request, client, bot_id)
+      bot = find_client_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      data = parse_json(request)
+      base = webhook_base_url(request, data['baseUrl'])
+      return error('Cannot determine the public base URL. Set PUBLIC_BASE_URL or pass baseUrl.', 400) if blank?(base)
+      return error('Webhook base URL must be https — Telegram refuses anything else', 400) unless base.start_with?('https://')
+
+      secret = SecureRandom.hex(32)
+      url    = "#{base.chomp('/')}/telegram/webhook/#{bot['id']}"
+      token  = @encryption.decrypt(bot['bot_token'])
+
+      begin
+        @telegram.set_webhook(
+          token,
+          url: url,
+          secret_token: secret,
+          drop_pending_updates: data['dropPendingUpdates'] == true
+        )
+      rescue StandardError => e
+        return error('Telegram rejected setWebhook', 400, details: e.message)
+      end
+
+      Services::Database.query(
+        "UPDATE client_telegram_bots SET delivery_mode = 'webhook', webhook_secret = ?, webhook_url = ?, last_error = NULL WHERE id = ?",
+        [secret, url, bot['id']]
+      )
+
+      # The listener and the webhook would otherwise both consume getUpdates.
+      Services::TelegramBotSupervisor.instance.stop(bot['id'])
+
+      json({ bot: serialize_bot(load_bot(bot['id'])), webhookUrl: url })
+    end
+
+    # DELETE /telegram/bots/:id/webhook — back to long polling.
+    def disable_webhook(client, bot_id)
+      bot = find_client_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      token = @encryption.decrypt(bot['bot_token'])
+      begin
+        @telegram.delete_webhook(token)
+      rescue StandardError => e
+        # Telegram may already have no webhook; local state still has to move,
+        # otherwise the bot is left with neither transport running.
+        warn "[telegram-webhook:#{bot['id']}] deleteWebhook failed: #{e.message}"
+      end
+
+      Services::Database.query(
+        "UPDATE client_telegram_bots SET delivery_mode = 'polling', webhook_secret = NULL, webhook_url = NULL WHERE id = ?",
+        [bot['id']]
+      )
+      Services::TelegramBotSupervisor.instance.start(bot['id'])
+
+      json({ bot: serialize_bot(load_bot(bot['id'])) })
+    end
+
+    # GET /telegram/bots/:id/webhook — what Telegram thinks is registered.
+    def webhook_info(client, bot_id)
+      bot = find_client_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      token = @encryption.decrypt(bot['bot_token'])
+      begin
+        info = @telegram.get_webhook_info(token)
+      rescue StandardError => e
+        return error('Telegram rejected getWebhookInfo', 502, details: e.message)
+      end
+
+      json({
+        deliveryMode: bot['delivery_mode'],
+        registered: !info['url'].to_s.empty?,
+        telegram: {
+          url: info['url'],
+          pendingUpdateCount: info['pending_update_count'],
+          lastErrorDate: info['last_error_date'],
+          lastErrorMessage: info['last_error_message'],
+          maxConnections: info['max_connections'],
+          ipAddress: info['ip_address']
+        }
+      })
     end
 
     # ── Bots ───────────────────────────────────────────────────────────
@@ -477,6 +607,8 @@ module Handlers
         botUsername:  row['bot_username'],
         botId:        row['bot_id'],
         isEnabled:    row['is_enabled'] == 1 || row['is_enabled'] == true,
+        deliveryMode: row['delivery_mode'] || 'polling',
+        webhookUrl:   row['webhook_url'],
         isDefault:    row['is_default'] == 1 || row['is_default'] == true,
         lastError:    row['last_error'],
         lastSeen:     row['last_seen']&.to_s,
@@ -537,6 +669,31 @@ module Handlers
 
     def blank?(value)
       value.nil? || value.to_s.empty?
+    end
+
+    def truthy?(value)
+      value == 1 || value == true
+    end
+
+    # Explicit override wins, then the configured public origin, then whatever
+    # the request claims. The last one is a guess behind a proxy, which is why
+    # the caller is told to set PUBLIC_BASE_URL.
+    def webhook_base_url(request, override)
+      return override.to_s.strip unless blank?(override)
+      return ENV['PUBLIC_BASE_URL'].to_s.strip unless blank?(ENV['PUBLIC_BASE_URL'])
+
+      request.base_url.to_s
+    rescue StandardError
+      ''
+    end
+
+    def mark_seen(bot_id, error_message)
+      Services::Database.query(
+        'UPDATE client_telegram_bots SET last_seen = NOW(), last_error = ? WHERE id = ?',
+        [error_message, bot_id]
+      )
+    rescue StandardError => e
+      warn "[telegram-webhook:#{bot_id}] mark_seen failed: #{e.message}"
     end
 
     def json(payload, status = 200)

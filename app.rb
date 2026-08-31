@@ -134,6 +134,14 @@ class App < Sinatra::Base
     emit mail_handler.logs(env['mail_service.client'])
   end
 
+  # ── Routes: Telegram webhook (public — authenticated by secret token) ──
+
+  # Telegram cannot send our X-Api-Key, so this route is public in the
+  # middleware and authenticates on X-Telegram-Bot-Api-Secret-Token instead.
+  post '/telegram/webhook/:bot_id' do
+    emit telegram_handler.receive_webhook(request, params['bot_id'].to_i)
+  end
+
   # ── Routes: Telegram (client key required via middleware) ──────────
 
   # Bots
@@ -159,6 +167,18 @@ class App < Sinatra::Base
 
   delete '/telegram/bots/:id' do
     emit telegram_handler.delete_bot(env['mail_service.client'], params['id'].to_i)
+  end
+
+  post '/telegram/bots/:id/webhook' do
+    emit telegram_handler.enable_webhook(request, env['mail_service.client'], params['id'].to_i)
+  end
+
+  get '/telegram/bots/:id/webhook' do
+    emit telegram_handler.webhook_info(env['mail_service.client'], params['id'].to_i)
+  end
+
+  delete '/telegram/bots/:id/webhook' do
+    emit telegram_handler.disable_webhook(env['mail_service.client'], params['id'].to_i)
   end
 
   post '/telegram/bots/:id/sync-commands' do

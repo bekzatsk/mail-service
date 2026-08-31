@@ -53,9 +53,11 @@ const LOGS = Array.from({ length: 140 }, (_, i) => {
 
 const BOTS = [
   { id: 11, name: 'acme-support', botUsername: 'acme_support_bot', botId: 7712345, isEnabled: true,
-    isDefault: true, lastError: null, lastSeen: '2026-08-31 10:44:00', createdAt: '2026-05-28 21:00:00', updatedAt: '2026-08-31 10:44:00' },
+    isDefault: true, deliveryMode: 'webhook', webhookUrl: 'https://email.innlab.kz/telegram/webhook/11',
+    lastError: null, lastSeen: '2026-08-31 10:44:00', createdAt: '2026-05-28 21:00:00', updatedAt: '2026-08-31 10:44:00' },
   { id: 12, name: 'acme-alerts', botUsername: 'acme_alerts_bot', botId: 7798765, isEnabled: false,
-    isDefault: false, lastError: 'Conflict: terminated by other getUpdates request',
+    isDefault: false, deliveryMode: 'polling', webhookUrl: null,
+    lastError: 'Conflict: terminated by other getUpdates request',
     lastSeen: '2026-08-29 08:10:00', createdAt: '2026-06-14 12:00:00', updatedAt: '2026-08-29 08:10:00' }
 ];
 
@@ -162,6 +164,13 @@ export function createServer() {
       if (pathname === '/telegram/commands') return json(res, { commands: COMMANDS });
       if (pathname === '/telegram/chats') return json(res, { chats: CHATS });
       if (pathname === '/telegram/messages') return json(res, { messages: MESSAGES });
+      if (/^\/telegram\/bots\/\d+\/webhook$/.test(pathname)) {
+        return json(res, {
+          deliveryMode: 'webhook', registered: true,
+          telegram: { url: 'https://email.innlab.kz/telegram/webhook/11', pendingUpdateCount: 0,
+                      lastErrorDate: null, lastErrorMessage: null, maxConnections: 40, ipAddress: '149.154.167.220' }
+        });
+      }
       return json(res, { error: 'Not found' }, 404);
     }
 

@@ -20,7 +20,12 @@ module Services
 
       install_shutdown_hook
 
-      rows = Database.query('SELECT id FROM client_telegram_bots WHERE is_enabled = TRUE')
+      # Webhook bots are driven by inbound requests; giving them a listener too
+      # would make both consumers race for getUpdates and earn a 409 from
+      # Telegram.
+      rows = Database.query(
+        "SELECT id FROM client_telegram_bots WHERE is_enabled = TRUE AND delivery_mode = 'polling'"
+      )
       rows.each { |row| start(row['id']) }
 
       puts "[telegram-supervisor] booted with #{@listeners.size} listener(s)"
@@ -28,8 +33,12 @@ module Services
       warn "[telegram-supervisor] boot failed: #{e.class}: #{e.message}"
     end
 
+    # No-op for a bot that is disabled or delivered by webhook, so handlers can
+    # call start/restart unconditionally after a write.
     def start(bot_id)
       bot_id = bot_id.to_i
+      return unless pollable?(bot_id)
+
       @mutex.synchronize do
         return if @listeners.key?(bot_id)
 
@@ -67,6 +76,18 @@ module Services
     end
 
     private
+
+    def pollable?(bot_id)
+      row = Database.query(
+        'SELECT is_enabled, delivery_mode FROM client_telegram_bots WHERE id = ?', [bot_id]
+      ).first
+      return false unless row
+
+      (row['is_enabled'] == 1 || row['is_enabled'] == true) && row['delivery_mode'].to_s != 'webhook'
+    rescue StandardError => e
+      warn "[telegram-supervisor] pollable? failed for #{bot_id}: #{e.message}"
+      false
+    end
 
     def install_shutdown_hook
       return if @hook_installed

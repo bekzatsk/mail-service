@@ -576,6 +576,51 @@ Any subset of `{ name, isEnabled, isDefault, botToken }`. If `botToken` changes,
 
 Stops the listener and cascade-deletes chats/commands/messages for this bot.
 
+### POST /telegram/bots/:id/webhook
+
+Switch this bot to webhook delivery. Generates a fresh secret token, calls
+Telegram's `setWebhook`, records the mode, and stops the bot's polling thread.
+
+**Auth:** Client key
+
+```json
+{ "baseUrl": "https://email.innlab.kz", "dropPendingUpdates": false }
+```
+
+`baseUrl` is optional; it defaults to `PUBLIC_BASE_URL`, then to the request's
+own origin. It must be https — Telegram refuses anything else. The webhook path
+is appended automatically, so the registered URL is
+`<baseUrl>/telegram/webhook/<bot id>`.
+
+Returns the updated bot plus `webhookUrl`. The secret token is never returned:
+it exists only to authenticate Telegram's deliveries, and a new one is issued on
+every switch.
+
+### GET /telegram/bots/:id/webhook
+
+What Telegram has registered, straight from `getWebhookInfo`, next to our own
+`deliveryMode`. Use it when a bot goes quiet: `pendingUpdateCount` climbing and a
+`lastErrorMessage` mean Telegram cannot reach the endpoint.
+
+### DELETE /telegram/bots/:id/webhook
+
+Back to long polling: `deleteWebhook` at Telegram, mode reset, listener started.
+If Telegram rejects `deleteWebhook` the local state still moves, otherwise the
+bot would be left with neither transport running.
+
+### POST /telegram/webhook/:bot_id
+
+**Called by Telegram, not by you.** No `X-Api-Key` — Telegram cannot send one.
+The request authenticates with the `X-Telegram-Bot-Api-Secret-Token` header,
+compared in constant time against the secret issued when the webhook was
+registered.
+
+Answers `200` for everything it accepts, including updates it ignores and
+updates whose processing failed, because a non-2xx makes Telegram redeliver.
+A wrong or missing secret token gets `403`; an unknown bot, or one with no
+webhook registered, gets `404` — the same answer, so the endpoint cannot be used
+to enumerate bot ids.
+
 ### POST /telegram/bots/:id/sync-commands
 
 Force a `setMyCommands` call to Telegram. Usually unnecessary — `POST/PATCH/DELETE /telegram/commands` does this automatically.

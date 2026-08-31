@@ -1,6 +1,6 @@
 import {
   el, field, openModal, confirmAction, toast, toastError,
-  badge, relativeTime, emptyState, withBusy
+  badge, relativeTime, formatDate, emptyState, withBusy
 } from '../../ui.js';
 
 function botStatus(bot) {
@@ -8,6 +8,123 @@ function botStatus(bot) {
   if (bot.lastError) return badge('error', 'bad');
   if (bot.lastSeen) return badge('listening', 'ok');
   return badge('starting', 'warn');
+}
+
+// Webhook means Telegram pushes updates to us; polling means a thread inside
+// the app process pulls them. Under Passenger the thread dies with an idle
+// process and duplicates across workers, so this is the more load-bearing
+// column than it looks.
+function transportBadge(bot) {
+  return bot.deliveryMode === 'webhook'
+    ? badge('webhook', 'ok')
+    : badge('polling', 'warn');
+}
+
+async function switchToWebhook(api, bot, onDone) {
+  const baseUrl = el('input', {
+    class: 'input input--mono', type: 'url',
+    placeholder: window.location.origin, value: window.location.origin
+  });
+  const dropPending = el('input', { type: 'checkbox' });
+  const error = el('p', { class: 'field__error' });
+
+  await openModal({
+    title: `Switch ${bot.name} to webhook`,
+    wide: true,
+    render: () => el('div', { class: 'form-grid' },
+      el('p', { class: 'mid', text: 'Telegram will POST updates to this service instead of the app polling for them. '
+        + 'The listener thread for this bot stops, which is the point: under Passenger it dies with an idle process and duplicates across workers.' }),
+      field('Public base URL', baseUrl, 'Must be https and reachable from Telegram. The webhook path is appended automatically.'),
+      el('label', { class: 'check' }, dropPending,
+        el('span', { text: 'Discard updates queued while polling was down' })),
+      el('p', { class: 'callout', text: 'A fresh secret token is generated and handed to Telegram. It is the only thing authenticating inbound updates, so it is stored, never shown, and replaced on every switch.' }),
+      error
+    ),
+    footer: ({ close }) => [
+      el('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => close(false) }),
+      el('button', {
+        class: 'btn btn--primary', type: 'button', text: 'Register webhook',
+        onclick: (event) => {
+          const base = baseUrl.value.trim();
+          if (!base.startsWith('https://')) {
+            error.textContent = 'Telegram only accepts an https URL.';
+            return;
+          }
+          error.textContent = '';
+          withBusy(event.currentTarget, async () => {
+            try {
+              const result = await api.enableWebhook(bot.id, {
+                baseUrl: base,
+                dropPendingUpdates: dropPending.checked
+              });
+              toast(`${bot.name} now receives updates at ${result.webhookUrl}`, 'success', 6000);
+              close(true);
+              await onDone();
+            } catch (failure) {
+              toastError(failure);
+            }
+          });
+        }
+      })
+    ]
+  });
+}
+
+async function switchToPolling(api, bot, onDone) {
+  const confirmed = await confirmAction({
+    title: `Switch ${bot.name} back to polling?`,
+    message: 'The webhook is removed at Telegram and a listener thread starts for this bot. '
+      + 'On a host that suspends idle processes the bot will stop responding whenever the app goes cold.',
+    confirmLabel: 'Switch to polling',
+    tone: 'default'
+  });
+  if (!confirmed) return;
+
+  try {
+    await api.disableWebhook(bot.id);
+    toast(`${bot.name} is back on long polling`, 'success');
+    await onDone();
+  } catch (error) {
+    toastError(error);
+  }
+}
+
+async function showWebhookInfo(api, bot) {
+  let info;
+  try {
+    info = await api.webhookInfo(bot.id);
+  } catch (error) {
+    toastError(error);
+    return;
+  }
+
+  const tg = info.telegram || {};
+  const row = (label, value) => (value === null || value === undefined || value === ''
+    ? []
+    : [el('dt', { text: label }), el('dd', { class: 'mono', text: String(value) })]);
+
+  await openModal({
+    title: `Webhook — ${bot.name}`,
+    wide: true,
+    render: () => el('div', { class: 'form-grid' },
+      el('dl', { class: 'kv' },
+        row('Mode', info.deliveryMode),
+        row('Registered', info.registered ? 'yes' : 'no'),
+        row('URL', tg.url),
+        row('Pending updates', tg.pendingUpdateCount),
+        row('Max connections', tg.maxConnections),
+        row('Telegram IP', tg.ipAddress),
+        row('Last error at', tg.lastErrorDate ? formatDate(new Date(tg.lastErrorDate * 1000).toISOString()) : null)
+      ),
+      tg.lastErrorMessage
+        ? el('div', {},
+            el('p', { class: 'field__label', style: { marginBottom: 'var(--space-2)' }, text: 'Last delivery error' }),
+            el('pre', { class: 'log-error', text: tg.lastErrorMessage })
+          )
+        : null
+    ),
+    footer: ({ close }) => el('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(true) })
+  });
 }
 
 async function openCreateDialog(api, onDone) {
@@ -158,6 +275,7 @@ function botRow(api, bot, onDone) {
       el('div', { class: 'cell-sub mono', text: bot.botUsername ? `@${bot.botUsername}` : '—' })
     ),
     el('td', {}, el('div', { class: 'badge-row' }, botStatus(bot), bot.isDefault ? badge('default', 'info') : null)),
+    el('td', {}, transportBadge(bot)),
     el('td', { class: 'dim nowrap', text: bot.lastSeen ? relativeTime(bot.lastSeen) : 'never' }),
     el('td', {}, bot.lastError
       ? el('span', { class: 'mono', style: { color: 'var(--c-danger)', fontSize: 'var(--text-xs)' }, text: bot.lastError })
@@ -179,6 +297,16 @@ function botRow(api, bot, onDone) {
               toastError(failure);
             }
           }) }),
+        bot.deliveryMode === 'webhook'
+          ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Webhook',
+              title: 'What Telegram has registered', onclick: () => showWebhookInfo(api, bot) })
+          : null,
+        bot.deliveryMode === 'webhook'
+          ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use polling',
+              onclick: () => switchToPolling(api, bot, onDone) })
+          : el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use webhook',
+              title: 'Let Telegram push updates instead of polling for them',
+              onclick: () => switchToWebhook(api, bot, onDone) }),
         el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Edit',
           onclick: () => openEditDialog(api, bot, onDone) }),
         el('button', { class: 'btn btn--ghost btn--sm btn--danger', type: 'button', text: 'Delete',
@@ -211,6 +339,7 @@ export async function renderBots({ api, bots, reloadBots, refresh }) {
         el('thead', {}, el('tr', {},
           el('th', { text: 'Bot' }),
           el('th', { text: 'State' }),
+          el('th', { text: 'Transport' }),
           el('th', { text: 'Last seen' }),
           el('th', { text: 'Last error' }),
           el('th', { class: 'right', text: '' })

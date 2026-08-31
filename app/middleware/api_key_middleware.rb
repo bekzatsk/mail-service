@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative '../services/database'
+require_relative '../services/secure_compare'
 
 module Middleware
   class ApiKeyMiddleware
@@ -26,7 +27,11 @@ module Middleware
     # request it makes still carries the master key.
     PUBLIC_ROUTES = [
       { method: 'GET', prefix: '/ui' },
-      { method: 'GET', prefix: '/favicon' }
+      { method: 'GET', prefix: '/favicon' },
+      # Telegram cannot send our X-Api-Key. These deliveries authenticate with
+      # the per-bot X-Telegram-Bot-Api-Secret-Token header instead, compared in
+      # TelegramHandler#receive_webhook. Unauthenticated here on purpose.
+      { method: 'POST', prefix: '/telegram/webhook/' }
     ].freeze
 
     # Exact paths that are public (the / -> /ui redirect)
@@ -107,15 +112,8 @@ module Middleware
       @app.call(env)
     end
 
-    # Constant-time string comparison to prevent timing attacks
     def secure_compare(a, b)
-      return false unless a.bytesize == b.bytesize
-
-      l = a.unpack('C*')
-      r = b.unpack('C*')
-      result = 0
-      l.zip(r) { |x, y| result |= x ^ y }
-      result.zero?
+      Services::SecureCompare.call(a, b)
     end
 
     def json_error(message, status)

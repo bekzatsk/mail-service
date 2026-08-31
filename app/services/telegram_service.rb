@@ -33,6 +33,28 @@ module Services
       call(token, 'getUpdates', { offset: offset, timeout: timeout }, read_timeout: timeout + 10)
     end
 
+    # Registers url as this bot's webhook. secret_token is echoed back by
+    # Telegram in the X-Telegram-Bot-Api-Secret-Token header on every delivery,
+    # and is the only thing authenticating an inbound update.
+    def set_webhook(token, url:, secret_token:, drop_pending_updates: false, max_connections: nil)
+      payload = {
+        url: url,
+        secret_token: secret_token,
+        drop_pending_updates: drop_pending_updates,
+        allowed_updates: %w[message edited_message]
+      }
+      payload[:max_connections] = max_connections if max_connections
+      call(token, 'setWebhook', payload)
+    end
+
+    def delete_webhook(token, drop_pending_updates: false)
+      call(token, 'deleteWebhook', { drop_pending_updates: drop_pending_updates })
+    end
+
+    def get_webhook_info(token)
+      call(token, 'getWebhookInfo', {})
+    end
+
     def set_my_commands(token, commands)
       call(token, 'setMyCommands', { commands: commands })
     end
