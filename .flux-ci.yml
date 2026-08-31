@@ -25,10 +25,9 @@ variables:
   # the job guards this value rather than trusting the default below.
   FLUX_FTP_HOST: "185.116.195.70"
   # Directory under the FTP account's root. On this Plesk host that is a domain
-  # name with no httpdocs level — but not necessarily the domain the service
-  # answers on: email.innlab.kz is an alias pointing at the mail.innlab.kz
-  # document root, which is where the checkout actually lives.
-  MAIL_REMOTE_DIR: "mail.innlab.kz"
+  # name with no httpdocs level. It holds the whole checkout, including .env,
+  # vendor/ and tmp/, which is why the mirror must never prune.
+  MAIL_REMOTE_DIR: "email.innlab.kz"
   # Where the deployed service answers. The deploy refuses to run without it,
   # because a deploy nobody verified is not a deploy. A secret of the same name
   # overrides this.
@@ -107,17 +106,7 @@ deploy-ftps:
     # only fails later, at the health check, with nothing pointing at the cause.
     # cmd:fail-exit turns a failed lftp command into a non-zero exit.
     - echo ">> checking ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR is the live checkout"
-    - >
-      LFTP_PASSWORD="$FLUX_FTP_PASS"
-      lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "
-      set ftp:ssl-allow yes;
-      set ftp:ssl-force yes;
-      set ssl:verify-certificate no;
-      set cmd:fail-exit yes;
-      set net:timeout 20;
-      cd '$MAIL_REMOTE_DIR';
-      cls -1 config.ru;
-      bye" || { echo "FAILED: ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR does not exist or holds no config.ru — check MAIL_REMOTE_DIR"; exit 1; }
+    - 'LFTP_PASSWORD="$FLUX_FTP_PASS" lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "set ftp:ssl-allow yes; set ftp:ssl-force yes; set ssl:verify-certificate no; set cmd:fail-exit yes; set net:timeout 20; cd $MAIL_REMOTE_DIR; cls -1 config.ru; bye" || { echo "FAILED: ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR does not exist or holds no config.ru - check MAIL_REMOTE_DIR"; exit 1; }'
 
     - echo ">> mirroring $PWD -> ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR"
 
@@ -125,30 +114,15 @@ deploy-ftps:
     # are in this repo. A mirror that pruned would take the service down.
     # Passenger reloads when tmp/restart.txt changes, so that goes up last.
     - printf '' > /tmp/restart.txt
-    - >
-      LFTP_PASSWORD="$FLUX_FTP_PASS"
-      lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "
-      set ftp:ssl-allow yes;
-      set ftp:ssl-force yes;
-      set ftp:ssl-protect-data yes;
-      set ssl:verify-certificate no;
-      set cmd:fail-exit yes;
-      set net:timeout 20;
-      set net:max-retries 3;
-      mirror --reverse --verbose --parallel=4
-        --exclude-glob .git/
-        --exclude-glob .idea/
-        --exclude-glob node_modules/
-        --exclude-glob vendor/
-        --exclude-glob tmp/
-        --exclude-glob test/
-        --exclude-glob script/
-        --exclude-glob .env
-        --exclude-glob .flux-ci.yml
-        . '$MAIL_REMOTE_DIR';
-      mkdir -p -f '$MAIL_REMOTE_DIR/tmp';
-      put /tmp/restart.txt -o '$MAIL_REMOTE_DIR/tmp/restart.txt';
-      bye"
+    # One physical line, on purpose. This was a folded (>) block, and YAML keeps
+    # the newlines of more-indented lines inside one - so lftp saw "mirror" and
+    # each "--exclude-glob" as separate commands. A bare "mirror --reverse" takes
+    # the current directories on both sides: it uploaded the entire workspace,
+    # .git included, into the FTP account root.
+    - EXCLUDES="--exclude-glob .git/ --exclude-glob .idea/ --exclude-glob .claude-flow/ --exclude-glob node_modules/ --exclude-glob vendor/ --exclude-glob tmp/ --exclude-glob test/ --exclude-glob script/ --exclude-glob .env --exclude-glob .flux-ci.yml"
+    # cd before mirror, and name both source and target explicitly, so even a
+    # mangled option list cannot land the upload anywhere but the target.
+    - 'LFTP_PASSWORD="$FLUX_FTP_PASS" lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "set ftp:ssl-allow yes; set ftp:ssl-force yes; set ftp:ssl-protect-data yes; set ssl:verify-certificate no; set cmd:fail-exit yes; set net:timeout 20; set net:max-retries 3; cd $MAIL_REMOTE_DIR; mirror --reverse --verbose --parallel=4 $EXCLUDES . .; mkdir -p -f tmp; put /tmp/restart.txt -o tmp/restart.txt; bye"'
 
     # A mirror that uploaded fine but left the old process running is still a
     # failed deploy, so gate on what the site actually answers.

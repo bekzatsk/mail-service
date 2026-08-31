@@ -86,7 +86,8 @@ Three stages: **verify** (`ruby-syntax`, `console-modules`, `secret-scan`), **te
 Things about this pipeline that are load-bearing:
 
 - **No `changes:` anywhere.** A skipped job skips everything that `needs` it, and `deploy-ftps` needs all three checks — path-filtering any of them would silently skip the deploy instead of the check.
-- **All lines of a job run in one shell** with `set -e`. `cd` persists between lines; each line is not its own step. That is why the lftp invocation is a single folded (`>`) block.
+- **All lines of a job run in one shell** with `set -e`. `cd` persists between lines; each line is not its own step.
+- **Never put an lftp invocation in a folded (`>`) block.** YAML folding joins equally-indented lines with a space but *keeps the newlines of more-indented lines*, and a newline inside `lftp -e "..."` separates commands. A `mirror` whose option lines were more-indented ran as a bare `mirror --reverse`, which defaults to the current directory on both sides and uploaded the whole workspace — `.git` included — into the FTP account root. Both lftp calls are single physical lines, the mirror `cd`s first and names source and target explicitly, and `script/check-ci-config.sh` asserts all of that.
 - **A YAML plain scalar cannot contain `": "` or start with `": "`.** `echo "NOTE: ..."` must be single-quoted or the save fails with a parse error pointing at that line.
 - **`find -exec ruby -c` exits 0 even when a file fails to parse**, which would take `ruby-syntax` green on a syntax error. It loops with `|| exit 1` instead.
 - **The deploy never passes `--delete`.** The host holds `.env`, `vendor/bundle` and `tmp/`, none of which are in this repo; a pruning mirror would take the service down. It also means a file deleted from the repo is not deleted from the host.
