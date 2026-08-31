@@ -233,10 +233,12 @@ It mirrors the repository to the Plesk host over FTPS and then uploads `tmp/rest
 
 | Name | Kind | Notes |
 |------|------|-------|
-| `MAIL_FTP_USER` | protected secret | FTP account |
-| `MAIL_FTP_PASS` | protected secret | reaches every domain on the shared host — protected only |
-| `MAIL_SITE_URL` | variable | e.g. `https://mail.example.com`; the deploy refuses to run without it |
-| `MAIL_FTP_HOST`, `MAIL_REMOTE_DIR` | variables | defaults are in `.flux-ci.yml` |
+| `FLUX_FTP_USER` | org secret | the shared FTP account for this host — already defined org-wide |
+| `FLUX_FTP_PASS` | org secret | reaches every domain on the shared host, so keep it protected |
+| `MAIL_SITE_URL` | secret or variable | e.g. `https://mail.example.com`; the deploy refuses to run without it |
+| `FLUX_FTP_HOST`, `MAIL_REMOTE_DIR` | variables | defaults are in `.flux-ci.yml` |
+
+The FTP credentials are the host-wide `FLUX_FTP_*` pair rather than anything named for this service, because one account covers every domain on the Plesk host. A protected secret arrives as an empty string on a non-protected ref, so `FLUX_FTP_USER is empty` from the deploy job means either "not defined" or "this ref is not protected".
 
 Two consequences of deploying over FTPS worth knowing:
 

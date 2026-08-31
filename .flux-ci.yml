@@ -15,12 +15,16 @@ stages: [verify, test, deploy]
 
 variables:
   # Plesk shared host. SSH does not answer, so FTPS is the only transport —
-  # same arrangement as the other project on this host.
-  MAIL_FTP_HOST: "185.116.195.70"
+  # same arrangement as the other project on this host, which is why the
+  # credentials are the shared org-scoped FLUX_FTP_USER / FLUX_FTP_PASS rather
+  # than anything named for this service. Overridable by a secret of the same
+  # name, since secrets outrank this block.
+  FLUX_FTP_HOST: "185.116.195.70"
   # Directory under the FTP account's root; also the domain's document root.
   MAIL_REMOTE_DIR: "mail-service"
-  # Set this as a project secret — the deploy refuses to run without it, because
-  # a deploy nobody verified is not a deploy.
+  # Where the deployed service answers. Set it under CI/CD → Secrets (or as a
+  # pipeline variable); the deploy refuses to run without it, because a deploy
+  # nobody verified is not a deploy.
   MAIL_SITE_URL: ""
   # Pinned: the smoke test is written against this Playwright API.
   PLAYWRIGHT_VERSION: "1.62.1"
@@ -81,23 +85,24 @@ deploy-ftps:
   when: manual
   needs: [route-auth, console-smoke, secret-scan]
   script:
-    # Protected secrets arrive as an empty string on a non-protected ref, which
-    # would otherwise fail deep inside lftp with a confusing message.
-    - test -n "$MAIL_FTP_USER" || { echo "MAIL_FTP_USER is empty — is this ref protected?"; exit 1; }
-    - test -n "$MAIL_FTP_PASS" || { echo "MAIL_FTP_PASS is empty — is this ref protected?"; exit 1; }
-    - test -n "$MAIL_SITE_URL" || { echo "MAIL_SITE_URL is not set — set it as a project variable so the deploy can verify itself"; exit 1; }
+    # A protected secret arrives as an empty string on a non-protected ref, so
+    # the two ways this is unset — never defined, or defined but withheld from
+    # this ref — look identical here and the message has to name both.
+    - 'test -n "${FLUX_FTP_USER:-}" || { echo "FLUX_FTP_USER is empty. Define it under CI/CD -> Secrets, and if it is marked protected, run this from a protected ref."; exit 1; }'
+    - 'test -n "${FLUX_FTP_PASS:-}" || { echo "FLUX_FTP_PASS is empty. Define it under CI/CD -> Secrets, and if it is marked protected, run this from a protected ref."; exit 1; }'
+    - 'test -n "${MAIL_SITE_URL:-}" || { echo "MAIL_SITE_URL is not set. Set it to where the service answers, e.g. https://mail.example.com, so the deploy can verify itself."; exit 1; }'
     - apk add --no-cache lftp curl > /dev/null
 
     - 'echo "NOTE: gems are not shipped. If Gemfile changed, run bundle install on the host — FTPS cannot."'
-    - echo ">> mirroring $PWD -> ftp://$MAIL_FTP_HOST/$MAIL_REMOTE_DIR"
+    - echo ">> mirroring $PWD -> ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR"
 
     # No --delete: the server holds .env, vendor/bundle and tmp/, none of which
     # are in this repo. A mirror that pruned would take the service down.
     # Passenger reloads when tmp/restart.txt changes, so that goes up last.
     - printf '' > /tmp/restart.txt
     - >
-      LFTP_PASSWORD="$MAIL_FTP_PASS"
-      lftp -u "$MAIL_FTP_USER" --env-password "ftp://$MAIL_FTP_HOST" -e "
+      LFTP_PASSWORD="$FLUX_FTP_PASS"
+      lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "
       set ftp:ssl-allow yes;
       set ftp:ssl-force yes;
       set ftp:ssl-protect-data yes;
