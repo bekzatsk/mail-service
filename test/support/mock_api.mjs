@@ -71,8 +71,8 @@ const COMMANDS = [
 ];
 
 const CHATS = [
-  { id: 31, botId: 11, chatId: -1001234567890, title: 'Acme Ops', chatType: 'supergroup', createdAt: '2026-06-02 10:00:00' },
-  { id: 32, botId: 11, chatId: 55512345, title: 'Bekzat', chatType: 'private', createdAt: '2026-06-09 17:22:00' }
+  { id: 31, botId: 11, chatId: -1001234567890, title: 'Acme Ops', routeName: 'errors', chatType: 'supergroup', createdAt: '2026-06-02 10:00:00' },
+  { id: 32, botId: 11, chatId: 55512345, title: 'Bekzat', routeName: null, chatType: 'private', createdAt: '2026-06-09 17:22:00' }
 ];
 
 const MESSAGES = [
@@ -163,6 +163,11 @@ export function createServer() {
       if (pathname === '/telegram/bots') return json(res, { bots: BOTS });
       if (pathname === '/telegram/commands') return json(res, { commands: COMMANDS });
       if (pathname === '/telegram/chats') return json(res, { chats: CHATS });
+      if (pathname === '/telegram/routes') {
+        return json(res, { routes: CHATS.filter((c) => c.routeName).map((c) => ({
+          route: c.routeName, chatId: c.chatId, title: c.title, chatType: c.chatType, botId: c.botId, botName: 'acme-support'
+        })) });
+      }
       if (pathname === '/telegram/messages') return json(res, { messages: MESSAGES });
       if (/^\/telegram\/bots\/\d+\/webhook$/.test(pathname)) {
         return json(res, {

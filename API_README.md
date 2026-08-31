@@ -264,6 +264,10 @@ Send an email using the authenticated client's stored SMTP configuration.
 
 **Auth:** Client key (`X-Api-Key: <client-key>`)
 
+Takes either `route` or `chatId`. With `route`, the bot is inferred from the
+route unless the same name exists on more than one bot, in which case name the
+bot with `botId` or `botName` and the request returns `409` until you do.
+
 **Request body:**
 
 | Field      | Type              | Required | Description                                        |
@@ -624,6 +628,58 @@ to enumerate bot ids.
 ### POST /telegram/bots/:id/sync-commands
 
 Force a `setMyCommands` call to Telegram. Usually unnecessary — `POST/PATCH/DELETE /telegram/commands` does this automatically.
+
+### Routes — sending without a chat id
+
+A **route** is a name that stands for a chat: `errors` reaches one group,
+`reports` another. A calling project sends the name; which group is behind it is
+decided here.
+
+That matters because the alternative is every project hard-coding chat ids. When
+a group is recreated or a notification has to move, you edit one row here instead
+of redeploying each caller.
+
+Name a route when you register the chat, or attach one later:
+
+```bash
+curl -X POST https://email.innlab.kz/telegram/chats \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"chatId": -1001234567890, "title": "Acme errors", "chatType": "supergroup", "routeName": "errors"}'
+```
+
+Then callers never mention a chat id again:
+
+```bash
+curl -X POST https://email.innlab.kz/telegram/messages \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"route": "errors", "text": "NullPointerException in OrderService"}'
+```
+
+Route names are lowercased on the way in, so `Errors` and `errors` are the same
+route and a caller cannot miss by capitalisation. A name is unique per bot;
+claiming one that is taken returns `409` naming the chat that holds it.
+
+To repoint a route at a different group, clear it from the old chat and set it on
+the new one with `PATCH /telegram/chats/:id`. Callers need no change.
+
+### GET /telegram/routes
+
+The address book: every named route for this client, with the chat and bot behind
+it. Useful as the thing you hand to whoever integrates a project.
+
+```json
+{
+  "routes": [
+    { "route": "errors", "chatId": -1001234567890, "title": "Acme errors",
+      "chatType": "supergroup", "botId": 11, "botName": "acme-support" }
+  ]
+}
+```
+
+### PATCH /telegram/chats/:id
+
+Body: `title` and/or `routeName`. An empty `routeName` removes the route, leaving
+the chat registered. `409` if another chat on the same bot already holds the name.
 
 ### POST /telegram/messages
 

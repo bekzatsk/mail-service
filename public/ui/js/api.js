@@ -103,7 +103,9 @@ export function client(apiKey) {
 
     chats:         (params) => call(`/telegram/chats${query(params)}`),
     createChat:    (body) => call('/telegram/chats', { method: 'POST', body }),
+    updateChat:    (id, body) => call(`/telegram/chats/${id}`, { method: 'PATCH', body }),
     deleteChat:    (id) => call(`/telegram/chats/${id}`, { method: 'DELETE' }),
+    routes:        () => call('/telegram/routes'),
 
     commands:      (params) => call(`/telegram/commands${query(params)}`),
     createCommand: (body) => call('/telegram/commands', { method: 'POST', body }),

@@ -207,6 +207,15 @@ class App < Sinatra::Base
     emit telegram_handler.list_chats(request, env['mail_service.client'])
   end
 
+  patch '/telegram/chats/:id' do
+    emit telegram_handler.update_chat(request, env['mail_service.client'], params['id'].to_i)
+  end
+
+  # Named destinations: what a calling project sends to instead of a chat id.
+  get '/telegram/routes' do
+    emit telegram_handler.list_routes(env['mail_service.client'])
+  end
+
   delete '/telegram/chats/:id' do
     emit telegram_handler.delete_chat(env['mail_service.client'], params['id'].to_i)
   end

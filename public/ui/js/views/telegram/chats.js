@@ -4,6 +4,51 @@ import {
 } from '../../ui.js';
 
 const CHAT_TYPES = ['private', 'group', 'supergroup', 'channel'];
+const ROUTE_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+// A route is the name a calling project sends instead of a chat id, so the
+// group behind "errors" can change here without a deploy on their side.
+async function openRouteDialog(api, chat, onDone) {
+  const route = el('input', {
+    class: 'input input--mono', type: 'text', value: chat.routeName || '',
+    placeholder: 'errors'
+  });
+  const error = el('p', { class: 'field__error' });
+
+  await openModal({
+    title: chat.routeName ? `Route for ${chat.title || chat.chatId}` : `Name a route for ${chat.title || chat.chatId}`,
+    render: () => el('div', { class: 'form-grid' },
+      field('Route name', route, 'Lowercase letters, digits, dash and underscore. Leave empty to remove the route.'),
+      el('p', { class: 'callout', text: 'Callers send {"route": "<name>", "text": "..."} and never hold a chat id. '
+        + 'Point the name at a different group here and every caller follows, with no change on their side.' }),
+      error
+    ),
+    footer: ({ close }) => [
+      el('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => close(false) }),
+      el('button', {
+        class: 'btn btn--primary', type: 'button', text: 'Save route',
+        onclick: (event) => {
+          const value = route.value.trim().toLowerCase();
+          if (value && !ROUTE_PATTERN.test(value)) {
+            error.textContent = 'Use 1-64 lowercase letters, digits, dash or underscore.';
+            return;
+          }
+          error.textContent = '';
+          withBusy(event.currentTarget, async () => {
+            try {
+              await api.updateChat(chat.id, { routeName: value });
+              toast(value ? `Route "${value}" now reaches this chat` : 'Route removed', 'success');
+              close(true);
+              await onDone();
+            } catch (failure) {
+              toastError(failure);
+            }
+          });
+        }
+      })
+    ]
+  });
+}
 
 async function openCreateDialog(api, bots, defaultBotId, onDone) {
   const bot = el('select', { class: 'select' },
@@ -18,6 +63,7 @@ async function openCreateDialog(api, bots, defaultBotId, onDone) {
   const chatType = el('select', { class: 'select' },
     CHAT_TYPES.map((type) => el('option', { value: type, text: type }))
   );
+  const routeName = el('input', { class: 'input input--mono', type: 'text', placeholder: 'errors' });
   const error = el('p', { class: 'field__error' });
 
   await openModal({
@@ -27,6 +73,7 @@ async function openCreateDialog(api, bots, defaultBotId, onDone) {
       field('Chat ID', chatId, 'Negative for groups and channels. The bot must already be a member.'),
       field('Title', title, 'Label used in this panel only.'),
       field('Type', chatType),
+      field('Route name', routeName, 'Optional. The name callers send instead of this chat id.'),
       error
     ),
     footer: ({ close }) => [
@@ -40,11 +87,17 @@ async function openCreateDialog(api, bots, defaultBotId, onDone) {
 
           withBusy(event.currentTarget, async () => {
             try {
+              const routeValue = routeName.value.trim().toLowerCase();
+              if (routeValue && !ROUTE_PATTERN.test(routeValue)) {
+                error.textContent = 'Route name: 1-64 lowercase letters, digits, dash or underscore.';
+                return;
+              }
               await api.createChat({
                 botId: Number(bot.value),
                 chatId: Number(value),
                 title: title.value.trim() || null,
-                chatType: chatType.value
+                chatType: chatType.value,
+                routeName: routeValue || null
               });
               toast('Chat registered', 'success');
               close(true);
@@ -128,11 +181,17 @@ function chatRow(api, chat, bots, botsById, onDone) {
       el('div', { class: 'cell-strong', text: chat.title || '(untitled)' }),
       el('div', { class: 'cell-sub mono', text: String(chat.chatId) })
     ),
+    el('td', {}, chat.routeName
+      ? el('span', { class: 'badge badge--ok badge--plain mono', text: chat.routeName })
+      : el('span', { class: 'dim', text: '—' })),
     el('td', {}, badge(chat.chatType, chat.chatType === 'private' ? 'info' : 'mute')),
     el('td', { class: 'mid nowrap', text: bot ? bot.name : `bot #${chat.botId}` }),
     el('td', { class: 'dim nowrap', text: formatDate(chat.createdAt) }),
     el('td', { class: 'right' },
       el('div', { class: 'row-actions' },
+        el('button', { class: 'btn btn--ghost btn--sm', type: 'button',
+          text: chat.routeName ? 'Route' : 'Name route',
+          onclick: () => openRouteDialog(api, chat, onDone) }),
         el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Send',
           onclick: () => openSendDialog(api, chat, bots, onDone) }),
         el('button', { class: 'btn btn--ghost btn--sm btn--danger', type: 'button', text: 'Remove',
@@ -169,6 +228,7 @@ export async function renderChats({ api, bots, refresh }) {
       el('table', { class: 'table' },
         el('thead', {}, el('tr', {},
           el('th', { text: 'Chat' }),
+          el('th', { text: 'Route' }),
           el('th', { text: 'Type' }),
           el('th', { text: 'Bot' }),
           el('th', { text: 'Registered' }),

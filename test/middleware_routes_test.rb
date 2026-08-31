@@ -101,7 +101,9 @@ puts "\nClient-only — sending and the Telegram gateway"
   ['GET',  '/logs'],
   ['GET',  '/telegram/bots'],
   ['POST', '/telegram/messages'],
-  ['GET',  '/telegram/commands']
+  ['GET',  '/telegram/commands'],
+  ['GET',  '/telegram/routes'],
+  ['PATCH', '/telegram/chats/9']
 ].each do |method, path|
   expect(middleware, method, path, nil,        401)
   expect(middleware, method, path, 'nonsense', 403)

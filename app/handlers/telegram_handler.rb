@@ -12,6 +12,9 @@ require_relative '../services/secure_compare'
 
 module Handlers
   class TelegramHandler
+    # A route is the address a calling project uses instead of a chat id, so it
+    # has to be typed by hand into someone else's config: lowercase, no spaces.
+    ROUTE_NAME_PATTERN = /\A[a-z0-9][a-z0-9_-]{0,63}\z/
     def initialize
       @encryption   = Services::EncryptionService.new
       @telegram     = Services::TelegramService.new
@@ -321,13 +324,43 @@ module Handlers
     # POST /telegram/messages
     def send_message(request, client)
       data = parse_json(request)
-      chat_id = data['chatId']
-      text    = data['text']
+      text = data['text']
 
-      return error('Missing required field: chatId', 400) if chat_id.nil?
       return error('Missing required field: text', 400) if blank?(text)
 
-      bot = resolve_bot(client, data)
+      # A caller names either a route or a chat id. Routes exist so the calling
+      # project never has to hold a chat id: the group behind "errors" can move
+      # without a deploy on their side.
+      chat_id = data['chatId']
+      bot     = nil
+
+      unless blank?(data['route'])
+        route = normalize_route(data['route'])
+        matches = Services::Database.query(
+          'SELECT c.*, b.id AS resolved_bot_id
+             FROM telegram_chats c
+             JOIN client_telegram_bots b ON b.id = c.bot_id
+            WHERE b.client_id = ? AND c.route_name = ?', [client['id'], route]
+        )
+
+        return error("Unknown route '#{route}'", 404) if matches.empty?
+        if matches.length > 1 && blank?(data['botId']) && blank?(data['botName'])
+          return error("Route '#{route}' exists on more than one bot — name the bot with botId or botName", 409)
+        end
+
+        match   = matches.length == 1 ? matches.first : nil
+        bot     = match ? load_bot(match['resolved_bot_id']) : resolve_bot(client, data)
+        return error('Bot not found', 404) unless bot
+
+        match ||= matches.find { |m| m['bot_id'] == bot['id'] }
+        return error("Route '#{route}' is not registered for this bot", 404) unless match
+
+        chat_id = match['chat_id']
+      end
+
+      return error('Missing required field: route or chatId', 400) if chat_id.nil?
+
+      bot ||= resolve_bot(client, data)
       return error('Bot not found', 404) unless bot
       return error('Bot is disabled', 400) unless bot['is_enabled'] == 1 || bot['is_enabled'] == true
 
@@ -414,15 +447,35 @@ module Handlers
       end
       title = data['title']
 
+      route = normalize_route(data['routeName'])
+      unless route.nil? || ROUTE_NAME_PATTERN.match?(route)
+        return error('Invalid routeName (1-64 chars, lowercase letters, digits, dash, underscore)', 400)
+      end
+
+      if route
+        taken = route_owner(bot['id'], route)
+        return error("Route '#{route}' already points at chat #{taken['chat_id']}", 409) if taken
+      end
+
       existing = Services::Database.query(
         'SELECT * FROM telegram_chats WHERE bot_id = ? AND chat_id = ?',
         [bot['id'], chat_id]
       ).first
-      return json({ chat: serialize_chat(existing) }) if existing
+      if existing
+        # Registering the same chat again is how a caller names it after the
+        # fact, so adopt the route rather than ignoring it.
+        if route && existing['route_name'].to_s != route
+          Services::Database.query(
+            'UPDATE telegram_chats SET route_name = ? WHERE id = ?', [route, existing['id']]
+          )
+          existing = Services::Database.query('SELECT * FROM telegram_chats WHERE id = ?', [existing['id']]).first
+        end
+        return json({ chat: serialize_chat(existing) })
+      end
 
       Services::Database.query(
-        'INSERT INTO telegram_chats (bot_id, chat_id, title, chat_type) VALUES (?, ?, ?, ?)',
-        [bot['id'], chat_id, title, chat_type]
+        'INSERT INTO telegram_chats (bot_id, chat_id, title, chat_type, route_name) VALUES (?, ?, ?, ?, ?)',
+        [bot['id'], chat_id, title, chat_type, route]
       )
       new_id = Services::Database.connection.last_id
       row = Services::Database.query('SELECT * FROM telegram_chats WHERE id = ?', [new_id]).first
@@ -446,6 +499,72 @@ module Handlers
                )
              end
       json({ chats: rows.map { |r| serialize_chat(r) } })
+    end
+
+    # PATCH /telegram/chats/:id
+    # Repointing a route is the whole point of naming one: the calling project
+    # keeps sending to "errors" while the group behind it changes here.
+    def update_chat(request, client, chat_pk)
+      row = find_client_chat(client, chat_pk)
+      return error('Chat not found', 404) unless row
+
+      data = parse_json(request)
+      sets = []
+      params = []
+
+      if data.key?('title')
+        sets << 'title = ?'
+        params << data['title']
+      end
+
+      if data.key?('routeName')
+        route = normalize_route(data['routeName'])
+        unless route.nil? || ROUTE_NAME_PATTERN.match?(route)
+          return error('Invalid routeName (1-64 chars, lowercase letters, digits, dash, underscore)', 400)
+        end
+
+        if route
+          taken = route_owner(row['bot_id'], route)
+          if taken && taken['id'] != row['id']
+            return error("Route '#{route}' already points at chat #{taken['chat_id']}", 409)
+          end
+        end
+
+        sets << 'route_name = ?'
+        params << route
+      end
+
+      return error('No fields to update', 400) if sets.empty?
+
+      params << chat_pk
+      Services::Database.query("UPDATE telegram_chats SET #{sets.join(', ')} WHERE id = ?", params)
+
+      json({ chat: serialize_chat(Services::Database.query('SELECT * FROM telegram_chats WHERE id = ?', [chat_pk]).first) })
+    end
+
+    # GET /telegram/routes
+    # The address book a calling project needs: which name reaches which group.
+    def list_routes(client)
+      rows = Services::Database.query(
+        'SELECT c.*, b.name AS bot_name, b.bot_username
+           FROM telegram_chats c
+           JOIN client_telegram_bots b ON b.id = c.bot_id
+          WHERE b.client_id = ? AND c.route_name IS NOT NULL
+          ORDER BY c.route_name', [client['id']]
+      )
+
+      json({
+        routes: rows.map do |row|
+          {
+            route:    row['route_name'],
+            chatId:   row['chat_id'],
+            title:    row['title'],
+            chatType: row['chat_type'],
+            botId:    row['bot_id'],
+            botName:  row['bot_name']
+          }
+        end
+      })
     end
 
     # DELETE /telegram/chats/:id
@@ -570,6 +689,29 @@ module Handlers
       ).first
     end
 
+    def find_client_chat(client, chat_pk)
+      Services::Database.query(
+        'SELECT c.* FROM telegram_chats c
+           JOIN client_telegram_bots b ON b.id = c.bot_id
+          WHERE c.id = ? AND b.client_id = ?', [chat_pk, client['id']]
+      ).first
+    end
+
+    def route_owner(bot_id, route)
+      Services::Database.query(
+        'SELECT * FROM telegram_chats WHERE bot_id = ? AND route_name = ?', [bot_id, route]
+      ).first
+    end
+
+    # An empty string clears the route; anything else is lowercased so callers
+    # cannot register "Errors" and then fail to reach it with "errors".
+    def normalize_route(value)
+      return nil if value.nil?
+
+      trimmed = value.to_s.strip.downcase
+      trimmed.empty? ? nil : trimmed
+    end
+
     def find_client_command(client, cmd_id)
       Services::Database.query(
         'SELECT c.* FROM telegram_commands c JOIN client_telegram_bots b ON b.id = c.bot_id WHERE c.id = ? AND b.client_id = ?',
@@ -623,6 +765,7 @@ module Handlers
         botId:     row['bot_id'],
         chatId:    row['chat_id'],
         title:     row['title'],
+        routeName: row['route_name'],
         chatType:  row['chat_type'],
         createdAt: row['created_at']&.to_s
       }
