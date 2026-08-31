@@ -20,12 +20,13 @@ variables:
   # than anything named for this service. Overridable by a secret of the same
   # name, since secrets outrank this block.
   FLUX_FTP_HOST: "185.116.195.70"
-  # Directory under the FTP account's root; also the domain's document root.
-  MAIL_REMOTE_DIR: "mail-service"
-  # Where the deployed service answers. Set it under CI/CD → Secrets (or as a
-  # pipeline variable); the deploy refuses to run without it, because a deploy
-  # nobody verified is not a deploy.
-  MAIL_SITE_URL: ""
+  # Directory under the FTP account's root. On this Plesk host that is the
+  # domain name itself, with no httpdocs level.
+  MAIL_REMOTE_DIR: "email.innlab.kz"
+  # Where the deployed service answers. The deploy refuses to run without it,
+  # because a deploy nobody verified is not a deploy. A secret of the same name
+  # overrides this.
+  MAIL_SITE_URL: "https://email.innlab.kz"
   # Pinned: the smoke test is written against this Playwright API.
   PLAYWRIGHT_VERSION: "1.62.1"
 
@@ -94,6 +95,23 @@ deploy-ftps:
     - apk add --no-cache lftp curl > /dev/null
 
     - 'echo "NOTE: gems are not shipped. If Gemfile changed, run bundle install on the host — FTPS cannot."'
+    # Assert the target before uploading anything. Without this, a wrong
+    # MAIL_REMOTE_DIR silently creates a directory nobody serves and the deploy
+    # only fails later, at the health check, with nothing pointing at the cause.
+    # cmd:fail-exit turns a failed lftp command into a non-zero exit.
+    - echo ">> checking ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR is the live checkout"
+    - >
+      LFTP_PASSWORD="$FLUX_FTP_PASS"
+      lftp -u "$FLUX_FTP_USER" --env-password "ftp://$FLUX_FTP_HOST" -e "
+      set ftp:ssl-allow yes;
+      set ftp:ssl-force yes;
+      set ssl:verify-certificate no;
+      set cmd:fail-exit yes;
+      set net:timeout 20;
+      cd '$MAIL_REMOTE_DIR';
+      cls -1 config.ru;
+      bye" || { echo "FAILED: ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR does not exist or holds no config.ru — check MAIL_REMOTE_DIR"; exit 1; }
+
     - echo ">> mirroring $PWD -> ftp://$FLUX_FTP_HOST/$MAIL_REMOTE_DIR"
 
     # No --delete: the server holds .env, vendor/bundle and tmp/, none of which
@@ -107,6 +125,7 @@ deploy-ftps:
       set ftp:ssl-force yes;
       set ftp:ssl-protect-data yes;
       set ssl:verify-certificate no;
+      set cmd:fail-exit yes;
       set net:timeout 20;
       set net:max-retries 3;
       mirror --reverse --verbose --parallel=4

@@ -235,8 +235,8 @@ It mirrors the repository to the Plesk host over FTPS and then uploads `tmp/rest
 |------|------|-------|
 | `FLUX_FTP_USER` | org secret | the shared FTP account for this host — already defined org-wide |
 | `FLUX_FTP_PASS` | org secret | reaches every domain on the shared host, so keep it protected |
-| `MAIL_SITE_URL` | secret or variable | e.g. `https://mail.example.com`; the deploy refuses to run without it |
-| `FLUX_FTP_HOST`, `MAIL_REMOTE_DIR` | variables | defaults are in `.flux-ci.yml` |
+| `MAIL_SITE_URL` | variable (secret overrides) | `https://email.innlab.kz` — the deploy refuses to run without it |
+| `FLUX_FTP_HOST`, `MAIL_REMOTE_DIR` | variables | `185.116.195.70` and `email.innlab.kz`; the FTP directory is the domain itself, no `httpdocs` level |
 
 The FTP credentials are the host-wide `FLUX_FTP_*` pair rather than anything named for this service, because one account covers every domain on the Plesk host. A protected secret arrives as an empty string on a non-protected ref, so `FLUX_FTP_USER is empty` from the deploy job means either "not defined" or "this ref is not protected".
 
@@ -244,6 +244,8 @@ Two consequences of deploying over FTPS worth knowing:
 
 - **Gems are not shipped.** There is no `bundle install` at the far end. After a `Gemfile` change, run it on the host once.
 - **Nothing is deleted.** The mirror never passes `--delete`, because the host holds `.env`, `vendor/bundle` and `tmp/`, which are not in this repo. A file removed from the repo stays on the server until removed by hand.
+
+Before uploading a byte it checks that `MAIL_REMOTE_DIR` exists and holds a `config.ru`, so a wrong directory fails immediately instead of creating one nobody serves.
 
 The job finishes by checking the live service: `/organizations` must answer `401` (the app restarted and auth is enforced) and `/ui/` must serve the console. Either failing fails the deploy.
 
