@@ -22,11 +22,18 @@ mail-service/
 ├── db/
 │   └── migrations/
 │       └── 001_create_tables.sql
+├── public/
+│   └── ui/                             # Admin console (static, no build step)
+│       ├── index.html
+│       ├── css/                        # tokens · base · components · views
+│       └── js/                         # api · store · router · ui · shell · views/
 └── app/
     ├── handlers/
     │   ├── organization_handler.rb     # POST/GET /organizations
     │   ├── config_handler.rb           # POST /config — client registration
-    │   └── mail_handler.rb             # POST /send, GET /logs
+    │   ├── mail_handler.rb             # POST /send, GET /logs
+    │   ├── telegram_handler.rb         # /telegram/*
+    │   └── admin_handler.rb            # /admin/* — console backend (master key)
     ├── middleware/
     │   └── api_key_middleware.rb        # Rack middleware: auth layer
     └── services/
@@ -34,6 +41,25 @@ mail-service/
         ├── encryption_service.rb       # AES-256-CBC encrypt/decrypt
         └── mail_service.rb             # Mail gem wrapper + logging
 ```
+
+## Admin console
+
+The service ships with a web console at **`/ui/`** (`/` redirects there). It is
+plain HTML/CSS/ES modules served straight out of `public/ui` — no Node, no build
+step, nothing to compile before deploying.
+
+Unlock it with the `MASTER_API_KEY`, then manage:
+
+- **Organizations** — create, rename, re-slug, delete
+- **Clients & keys** — issue keys, edit SMTP config, test stored credentials, rotate or revoke keys
+- **Mail logs** — filter by organization, client, status or text; inspect the full envelope and delivery error
+- **Telegram** — bots, slash commands, chats and message history for the selected client
+- **Send test** — compose a message through any client key
+
+The console keeps the master key in `sessionStorage` (or `localStorage` if you
+tick "keep me signed in") and sends it as `X-Api-Key` on every request. Because
+the master key can read every client key, only unlock it on a trusted machine
+and serve the service over HTTPS.
 
 ## Requirements
 
@@ -115,12 +141,13 @@ touch tmp/restart.txt
 
 The service uses two types of API keys via the `X-Api-Key` header:
 
-| Key type         | Used for                                 | How to get                  |
-|------------------|------------------------------------------|-----------------------------|
-| **Master key**   | `POST /organizations`, `POST /config`    | Set `MASTER_API_KEY` in `.env` |
-| **Client key**   | `POST /send`, `GET /logs`                | Returned by `POST /config`  |
+| Key type         | Used for                                       | How to get                  |
+|------------------|------------------------------------------------|-----------------------------|
+| **Master key**   | all `/organizations*`, `/config*`, `/admin/*`  | Set `MASTER_API_KEY` in `.env` |
+| **Client key**   | `POST /send`, `GET /logs`, all `/telegram/*`   | Returned by `POST /config`  |
 
-`GET /organizations` and `GET /organizations/:id` are public (no key required).
+No API endpoint is public. The only unauthenticated routes are the console's own
+static assets under `/ui/` (and `/`, which redirects there).
 
 ## Quick Start
 
@@ -172,6 +199,52 @@ curl http://localhost:8080/logs -H "X-Api-Key: abc123..."
 
 For full API documentation see [API_README.md](API_README.md).
 
+## CI/CD
+
+The pipeline lives in [`.flux-ci.yml`](.flux-ci.yml) and runs on [Flux CI](https://flux.innlab.kz/docs/pipeline). Flux imports that file from the repository on first open, on "Sync from repo", and on any push that touches it.
+
+| Stage | Job | What it proves |
+|-------|-----|----------------|
+| verify | `ruby-syntax` | every `.rb` and `config.ru` parses |
+| verify | `console-modules` | every console ES module parses; no `innerHTML`/`eval`; every asset `index.html` references exists |
+| verify | `secret-scan` | no `.env`, credential assignment, live API key or private key in the tracked tree |
+| test | `route-auth` | 69 assertions on who may reach which route with which key |
+| test | `console-smoke` | the console boots in Chromium, every view renders, no uncaught errors, no overflow at 320–1920px |
+| deploy | `deploy-ftps` | **manual** — FTPS mirror to the host, then verifies the live service |
+
+Run any of them locally — none needs a database:
+
+```bash
+ruby test/middleware_routes_test.rb
+sh script/check-ui-modules.sh
+sh script/check-secrets.sh
+
+npm i --no-save playwright@1.62.1 && npx playwright install chromium
+node test/ui_smoke_test.mjs
+```
+
+`node test/support/mock_api.mjs 8117` serves the console against fixtures at <http://127.0.0.1:8117/ui/> (master key `test-master-key`) — useful for working on the UI without a database.
+
+### Deploy
+
+`deploy-ftps` is `when: manual`, so a push builds and tests without shipping anything; someone presses play to deploy.
+
+It mirrors the repository to the Plesk host over FTPS and then uploads `tmp/restart.txt` to make Passenger reload. Set in Flux:
+
+| Name | Kind | Notes |
+|------|------|-------|
+| `MAIL_FTP_USER` | protected secret | FTP account |
+| `MAIL_FTP_PASS` | protected secret | reaches every domain on the shared host — protected only |
+| `MAIL_SITE_URL` | variable | e.g. `https://mail.example.com`; the deploy refuses to run without it |
+| `MAIL_FTP_HOST`, `MAIL_REMOTE_DIR` | variables | defaults are in `.flux-ci.yml` |
+
+Two consequences of deploying over FTPS worth knowing:
+
+- **Gems are not shipped.** There is no `bundle install` at the far end. After a `Gemfile` change, run it on the host once.
+- **Nothing is deleted.** The mirror never passes `--delete`, because the host holds `.env`, `vendor/bundle` and `tmp/`, which are not in this repo. A file removed from the repo stays on the server until removed by hand.
+
+The job finishes by checking the live service: `/organizations` must answer `401` (the app restarted and auth is enforced) and `/ui/` must serve the console. Either failing fails the deploy.
+
 ## Security
 
 - SMTP passwords are encrypted with AES-256-CBC before storage. The IV is generated per-record and stored alongside the ciphertext.
@@ -179,6 +252,7 @@ For full API documentation see [API_README.md](API_README.md).
 - The `ENCRYPTION_KEY` environment variable is hashed with SHA-256 to derive the actual 32-byte encryption key.
 - Master key comparison uses constant-time algorithm to prevent timing attacks.
 - Never commit your `.env` file to version control.
+- `GET /admin/clients` returns client API keys in plaintext — the console needs them to act on a client's behalf. Anyone holding the master key already has full control, but keep the console behind HTTPS and off shared machines.
 
 ## License
 

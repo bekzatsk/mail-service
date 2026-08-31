@@ -11,9 +11,27 @@ module Middleware
       { method: 'POST', path: '/config/test' }
     ].freeze
 
-    # Routes that are fully public (no key needed)
+    # Route prefixes that require the MASTER_API_KEY (admin UI backend, and
+    # organization reads — the tenant list is not something a client may enumerate)
+    MASTER_PREFIXES = [
+      { method: 'GET',    prefix: '/admin' },
+      { method: 'POST',   prefix: '/admin' },
+      { method: 'PATCH',  prefix: '/admin' },
+      { method: 'DELETE', prefix: '/admin' },
+      { method: 'GET',    prefix: '/organizations' }
+    ].freeze
+
+    # Routes that are fully public (no key needed).
+    # Only the admin UI's own static assets — the panel holds no data, and every
+    # request it makes still carries the master key.
     PUBLIC_ROUTES = [
-      { method: 'GET', prefix: '/organizations' }
+      { method: 'GET', prefix: '/ui' },
+      { method: 'GET', prefix: '/favicon' }
+    ].freeze
+
+    # Exact paths that are public (the / -> /ui redirect)
+    PUBLIC_PATHS = [
+      { method: 'GET', path: '/' }
     ].freeze
 
     def initialize(app)
@@ -49,15 +67,15 @@ module Middleware
     private
 
     def public_route?(method, path)
-      PUBLIC_ROUTES.any? do |route|
-        method == route[:method] && path.start_with?(route[:prefix])
-      end
+      PUBLIC_PATHS.any? { |r| method == r[:method] && path == r[:path] } ||
+        PUBLIC_ROUTES.any? do |route|
+          method == route[:method] && path.start_with?(route[:prefix])
+        end
     end
 
     def master_route?(method, path)
-      MASTER_ROUTES.any? do |route|
-        method == route[:method] && path == route[:path]
-      end
+      MASTER_ROUTES.any? { |r| method == r[:method] && path == r[:path] } ||
+        MASTER_PREFIXES.any? { |r| method == r[:method] && path.start_with?(r[:prefix]) }
     end
 
     def authenticate_master(api_key, env)

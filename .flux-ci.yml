@@ -1,0 +1,140 @@
+# Flux CI pipeline for mail-service.
+#
+# Reference: https://flux.innlab.kz/docs/pipeline
+#
+# The service has no build step — it is Ruby served by Passenger plus a console
+# of raw ES modules — so CI is about proving the thing still works and that no
+# credential leaked, then mirroring the source to the host.
+#
+# Note on `changes:` — deliberately unused. A skipped job skips everything that
+# needs it, and deploy-ftps needs all three checks, so path-filtering any of them
+# would silently skip the deploy. The whole suite runs in well under a minute
+# anyway, apart from the browser smoke test.
+
+stages: [verify, test, deploy]
+
+variables:
+  # Plesk shared host. SSH does not answer, so FTPS is the only transport —
+  # same arrangement as the other project on this host.
+  MAIL_FTP_HOST: "185.116.195.70"
+  # Directory under the FTP account's root; also the domain's document root.
+  MAIL_REMOTE_DIR: "mail-service"
+  # Set this as a project secret — the deploy refuses to run without it, because
+  # a deploy nobody verified is not a deploy.
+  MAIL_SITE_URL: ""
+  # Pinned: the smoke test is written against this Playwright API.
+  PLAYWRIGHT_VERSION: "1.62.1"
+
+# ── verify ──────────────────────────────────────────────────────────
+
+ruby-syntax:
+  stage: verify
+  image: ruby:3.2-alpine
+  script:
+    - echo "checking $(find . -name '*.rb' -not -path './vendor/*' | wc -l) ruby files"
+    # A loop, not `find -exec`: find exits 0 even when ruby -c fails, which would
+    # take this job green on a syntax error.
+    - for f in $(find . -name '*.rb' -not -path './vendor/*'); do ruby -c "$f" > /dev/null || exit 1; done
+    - ruby -c config.ru > /dev/null
+    - echo "ok    every ruby file parses"
+
+console-modules:
+  stage: verify
+  image: node:22-alpine
+  script:
+    - sh script/check-ui-modules.sh
+
+secret-scan:
+  stage: verify
+  image: alpine:3.20
+  script:
+    - apk add --no-cache git > /dev/null
+    # The runner clones into a fresh workspace; git ls-files needs to see it.
+    - git config --global --add safe.directory "$PWD"
+    - sh script/check-secrets.sh
+
+# ── test ────────────────────────────────────────────────────────────
+
+route-auth:
+  stage: test
+  image: ruby:3.2-alpine
+  needs: [ruby-syntax]
+  script:
+    # Who may reach which route with which key — the security boundary of the
+    # whole service. Runs without a bundle or a database by design.
+    - ruby test/middleware_routes_test.rb
+
+console-smoke:
+  stage: test
+  image: node:22-bookworm
+  needs: [console-modules]
+  script:
+    - npm install --no-save --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION"
+    - npx playwright install --with-deps chromium
+    - node test/ui_smoke_test.mjs
+
+# ── deploy ──────────────────────────────────────────────────────────
+
+deploy-ftps:
+  stage: deploy
+  image: alpine:3.20
+  when: manual
+  needs: [route-auth, console-smoke, secret-scan]
+  script:
+    # Protected secrets arrive as an empty string on a non-protected ref, which
+    # would otherwise fail deep inside lftp with a confusing message.
+    - test -n "$MAIL_FTP_USER" || { echo "MAIL_FTP_USER is empty — is this ref protected?"; exit 1; }
+    - test -n "$MAIL_FTP_PASS" || { echo "MAIL_FTP_PASS is empty — is this ref protected?"; exit 1; }
+    - test -n "$MAIL_SITE_URL" || { echo "MAIL_SITE_URL is not set — set it as a project variable so the deploy can verify itself"; exit 1; }
+    - apk add --no-cache lftp curl > /dev/null
+
+    - 'echo "NOTE: gems are not shipped. If Gemfile changed, run bundle install on the host — FTPS cannot."'
+    - echo ">> mirroring $PWD -> ftp://$MAIL_FTP_HOST/$MAIL_REMOTE_DIR"
+
+    # No --delete: the server holds .env, vendor/bundle and tmp/, none of which
+    # are in this repo. A mirror that pruned would take the service down.
+    # Passenger reloads when tmp/restart.txt changes, so that goes up last.
+    - printf '' > /tmp/restart.txt
+    - >
+      LFTP_PASSWORD="$MAIL_FTP_PASS"
+      lftp -u "$MAIL_FTP_USER" --env-password "ftp://$MAIL_FTP_HOST" -e "
+      set ftp:ssl-allow yes;
+      set ftp:ssl-force yes;
+      set ftp:ssl-protect-data yes;
+      set ssl:verify-certificate no;
+      set net:timeout 20;
+      set net:max-retries 3;
+      mirror --reverse --verbose --parallel=4
+        --exclude-glob .git/
+        --exclude-glob .idea/
+        --exclude-glob node_modules/
+        --exclude-glob vendor/
+        --exclude-glob tmp/
+        --exclude-glob test/
+        --exclude-glob script/
+        --exclude-glob .env
+        --exclude-glob .flux-ci.yml
+        . '$MAIL_REMOTE_DIR';
+      mkdir -p -f '$MAIL_REMOTE_DIR/tmp';
+      put /tmp/restart.txt -o '$MAIL_REMOTE_DIR/tmp/restart.txt';
+      bye"
+
+    # A mirror that uploaded fine but left the old process running is still a
+    # failed deploy, so gate on what the site actually answers.
+    - echo ">> waiting for Passenger to pick up the new code"
+    - code=""
+    - >
+      for attempt in 1 2 3 4 5 6; do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$MAIL_SITE_URL/organizations" || true);
+        if [ "$code" = "401" ]; then break; fi;
+        echo "   attempt $attempt: got ${code:-no response}, expected 401";
+        sleep 5;
+      done
+    - 'test "$code" = "401" || { echo "FAILED: $MAIL_SITE_URL/organizations returned ${code:-nothing}, expected 401 — the app did not come back, or auth is not enforced"; exit 1; }'
+    - echo "ok    API up and rejecting unauthenticated reads"
+
+    # And the console itself — it ships as static files, so a broken mirror shows
+    # up here rather than the first time somebody opens the panel.
+    - 'curl -fsS --max-time 30 "$MAIL_SITE_URL/ui/" | grep -q "mail·svc console" || { echo "FAILED: $MAIL_SITE_URL/ui/ did not serve the console"; exit 1; }'
+    - echo "ok    admin console served at $MAIL_SITE_URL/ui/"
+    - echo ">> deployed $CI_COMMIT_SHORT_SHA"

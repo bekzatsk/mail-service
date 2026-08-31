@@ -19,7 +19,7 @@ All authenticated endpoints use the `X-Api-Key` header. There are two key types:
 X-Api-Key: <master-key-or-client-key>
 ```
 
-`GET /organizations` and `GET /organizations/:id` are public — no key required.
+There are no public endpoints. `GET /organizations` and `GET /organizations/:id` require the master key, same as `POST /organizations`.
 
 If the header is missing, the API returns `401`. If the key is invalid, it returns `403`.
 
@@ -83,12 +83,13 @@ curl -X POST http://localhost:8080/organizations \
 
 List all organizations.
 
-**Auth:** None (public endpoint)
+**Auth:** Master key
 
 **Example request:**
 
 ```bash
-curl http://localhost:8080/organizations
+curl http://localhost:8080/organizations \
+  -H "X-Api-Key: your-master-api-key"
 ```
 
 **Success response** — `200 OK`:
@@ -108,12 +109,13 @@ curl http://localhost:8080/organizations
 
 Get a single organization with its client count.
 
-**Auth:** None (public endpoint)
+**Auth:** Master key
 
 **Example request:**
 
 ```bash
-curl http://localhost:8080/organizations/1
+curl http://localhost:8080/organizations/1 \
+  -H "X-Api-Key: your-master-api-key"
 ```
 
 **Success response** — `200 OK`:
@@ -379,6 +381,101 @@ curl http://localhost:8080/logs \
 ```
 
 ---
+
+## Admin console API
+
+These endpoints back the web console at `/ui/`. Every one of them requires the
+**master key** (`X-Api-Key: <MASTER_API_KEY>`). They exist so an operator can see
+and manage what the client-scoped endpoints cannot.
+
+> **They return client API keys in plaintext.** `GET /admin/clients` includes
+> `apiKey` for each client, because the console uses it to call `/send` and
+> `/telegram/*` on the operator's behalf. Treat the master key accordingly.
+
+### GET /admin/stats
+
+```json
+{
+  "organizations": 3,
+  "clients": 5,
+  "mail":     { "total": 470, "sent": 438, "failed": 32, "last24h": 61 },
+  "telegram": { "bots": 3, "enabled_bots": 2, "messages": 128 }
+}
+```
+
+### GET /admin/organizations
+
+Like `GET /organizations`, plus `clientsCount` and `logsCount` per row.
+
+### PATCH /admin/organizations/:id
+
+Body: `{ "name": "...", "slug": "..." }` — both optional, at least one required.
+Slug must match `[a-z0-9-]+` and stay unique. Returns the updated organization.
+
+### DELETE /admin/organizations/:id
+
+Cascades to the organization's clients and their mail logs. `{"message": "Organization deleted"}`.
+
+### GET /admin/clients[?organization_id=1]
+
+```json
+{
+  "clients": [{
+    "id": 1, "organizationId": 1, "organizationName": "Acme",
+    "apiKey": "a1b2…", "smtpHost": "smtp.example.com", "smtpPort": 587,
+    "smtpUser": "no-reply@example.com", "fromAddress": "no-reply@example.com",
+    "logsCount": 380, "botsCount": 2, "createdAt": "2026-02-11 09:20:00"
+  }]
+}
+```
+
+`smtp_pass` is never returned.
+
+### GET /admin/clients/:id
+
+Single client, same shape.
+
+### PATCH /admin/clients/:id
+
+Body may carry any of `smtp_host`, `smtp_port`, `smtp_user`, `smtp_pass`,
+`from_address`. Omitting `smtp_pass` leaves the stored password untouched;
+supplying it re-encrypts the new value.
+
+### POST /admin/clients/:id/rotate-key
+
+Issues a fresh `SecureRandom.hex(32)` key. **The previous key stops working immediately.**
+
+```json
+{ "api_key": "new-key…", "message": "API key rotated — the previous key no longer works" }
+```
+
+### POST /admin/clients/:id/test
+
+Decrypts the stored SMTP password and runs the same connect+auth check as
+`/config/test`. Returns `{ "success": true|false, "message": "…" }`.
+
+### DELETE /admin/clients/:id
+
+Removes the client, its mail logs and its Telegram bots.
+
+### GET /admin/logs
+
+Query parameters — all optional: `organization_id`, `client_id`,
+`status` (`sent`|`failed`), `q` (matches subject or recipient),
+`limit` (1–500, default 100), `offset`.
+
+```json
+{
+  "logs": [{
+    "id": 1000, "clientId": 1, "organizationId": 1, "organizationName": "Acme",
+    "fromAddress": "no-reply@acme.com", "toAddress": ["user@example.com"],
+    "cc": [], "bcc": [], "replyTo": null, "priority": null,
+    "subject": "Password reset", "status": "sent", "error": null,
+    "createdAt": "2026-08-31 10:44:00"
+  }],
+  "total": 470, "limit": 100, "offset": 0
+}
+```
 
 ## Error Codes Summary
 

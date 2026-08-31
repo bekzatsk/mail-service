@@ -46,3 +46,9 @@ jwt-keystore.*
 
 # Claude Code
 .claude/
+
+# Agent tooling state (generated, not project code)
+.claude-flow/
+
+# Node deps for the UI smoke test (installed by CI, never committed)
+node_modules/
