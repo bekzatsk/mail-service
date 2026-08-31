@@ -48,6 +48,14 @@ ruby-syntax:
     - ruby -c config.ru > /dev/null
     - echo "ok    every ruby file parses"
 
+pipeline-config:
+  stage: verify
+  image: ruby:3.2-alpine
+  script:
+    # Asserts this file's own invariants. Nothing else type-checks a pipeline,
+    # and its mistakes only surface on a runner, against production.
+    - ruby test/ci_config_test.rb
+
 console-modules:
   stage: verify
   image: node:22-alpine
@@ -89,7 +97,7 @@ deploy-ftps:
   stage: deploy
   image: alpine:3.20
   when: manual
-  needs: [route-auth, console-smoke, secret-scan]
+  needs: [route-auth, console-smoke, secret-scan, pipeline-config]
   script:
     # A protected secret arrives as an empty string on a non-protected ref, so
     # the two ways this is unset — never defined, or defined but withheld from
