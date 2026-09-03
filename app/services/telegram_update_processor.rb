@@ -16,6 +16,28 @@ module Services
   # rather than drifting apart — the transport decides how an update arrives,
   # never what happens to it.
   class TelegramUpdateProcessor
+    # /name, /name@thisbot, optionally followed by arguments.
+    #
+    # The name must end at whitespace, an @, or the end of the message. Without
+    # that anchor, `\s*` let a 34-character token match as a 32-character command
+    # plus stray args — Telegram caps a command at 32 and would not treat it as
+    # one at all, so ours has to agree or the two disagree about what was sent.
+    COMMAND_PATTERN = %r{\A/([A-Za-z0-9_]{1,32})(?:@\S+)?(?:\s+(.*))?\z}m
+
+    # Pure: what command, if any, a message text names.
+    # Extracted so the dispatch decision can be tested without a database.
+    #
+    # @return [Array(String, String), nil] [command, args], command downcased
+    def self.parse_command(text)
+      text = text.to_s
+      return nil unless text.start_with?('/')
+
+      match = text.match(COMMAND_PATTERN)
+      return nil unless match
+
+      [match[1].downcase, match[2].to_s]
+    end
+
     def initialize
       @telegram   = TelegramService.new
       @encryption = EncryptionService.new
@@ -33,24 +55,31 @@ module Services
 
       log_inbound(bot, msg, chat, from, text)
 
-      return unless text.start_with?('/')
+      parsed = self.class.parse_command(text)
 
-      match = text.match(%r{\A/([A-Za-z0-9_]{1,32})(?:@\S+)?\s*(.*)\z}m)
-      return unless match
+      if parsed
+        cmd_row = Database.query(
+          'SELECT * FROM telegram_commands WHERE bot_id = ? AND command = ? AND is_enabled = TRUE',
+          [bot['id'], parsed[0]]
+        ).first
 
-      command = match[1].downcase
-      args    = match[2].to_s
-
-      cmd_row = Database.query(
-        'SELECT * FROM telegram_commands WHERE bot_id = ? AND command = ? AND is_enabled = TRUE',
-        [bot['id'], command]
-      ).first
-
-      if cmd_row
-        dispatch_command(bot, msg, cmd_row, command, args)
-      elsif ENV.fetch('TELEGRAM_UNKNOWN_COMMAND_REPLY', 'false') == 'true'
-        send_text(bot, chat['id'], 'Unknown command', reply_to: msg['message_id'])
+        if cmd_row
+          dispatch_command(bot, msg, cmd_row, parsed[0], parsed[1])
+          return
+        end
       end
+
+      # Everything a command row did not claim — plain text, and slash commands
+      # with no row — goes to the bot's message handler. Without one, a plain
+      # message would only ever reach the log, which is the gap this closes.
+      unless blank?(bot['message_handler_url'])
+        dispatch_message(bot, msg, parsed)
+        return
+      end
+
+      return unless parsed && ENV.fetch('TELEGRAM_UNKNOWN_COMMAND_REPLY', 'false') == 'true'
+
+      send_text(bot, chat['id'], 'Unknown command', reply_to: msg['message_id'])
     end
 
     private
@@ -64,21 +93,48 @@ module Services
       warn "[telegram-processor:#{bot['id']}] log_inbound failed: #{e.message}"
     end
 
-    def dispatch_command(bot, msg, cmd_row, command, args)
-      return if cmd_row['handler_url'].to_s.empty?
+    def blank?(value)
+      value.nil? || value.to_s.strip.empty?
+    end
 
-      payload = {
+    def base_payload(bot, msg)
+      {
         chatId:    msg.dig('chat', 'id'),
+        chatType:  msg.dig('chat', 'type'),
         userId:    msg.dig('from', 'id'),
         username:  msg.dig('from', 'username'),
-        command:   command,
-        args:      args,
+        text:      msg['text'].to_s,
         messageId: msg['message_id'],
         botId:     bot['id'],
         botName:   bot['name']
       }
+    end
 
-      uri = URI.parse(cmd_row['handler_url'])
+    def dispatch_command(bot, msg, cmd_row, command, args)
+      return if blank?(cmd_row['handler_url'])
+
+      payload = base_payload(bot, msg).merge(command: command, args: args)
+      deliver(bot, msg, cmd_row['handler_url'], cmd_row['handler_secret'], payload,
+              label: "command:#{command}")
+    end
+
+    # Plain messages, and slash commands no row claimed. `parsed` is nil for
+    # ordinary text; when it is a command the name and args are passed through
+    # so the project can tell the two apart without re-parsing.
+    def dispatch_message(bot, msg, parsed)
+      payload = base_payload(bot, msg).merge(
+        command: parsed&.first,
+        args:    parsed ? parsed[1] : nil
+      )
+      deliver(bot, msg, bot['message_handler_url'], bot['message_handler_secret'], payload,
+              label: 'message')
+    end
+
+    # POST the payload, and send whatever text comes back into the chat.
+    # A handler that answers with no text is choosing silence, which is a normal
+    # outcome — most inbound messages do not deserve a reply.
+    def deliver(bot, msg, url, secret, payload, label:)
+      uri = URI.parse(url)
       http = Net::HTTP.new(uri.host, uri.port)
       http.use_ssl = uri.scheme == 'https'
       http.open_timeout = 5
@@ -87,7 +143,7 @@ module Services
       req = Net::HTTP::Post.new(uri.request_uri)
       req['Content-Type'] = 'application/json'
       req['User-Agent']   = ENV.fetch('TELEGRAM_HTTP_USER_AGENT', 'mail-service/telegram-gateway')
-      req['X-Handler-Secret'] = cmd_row['handler_secret'] if cmd_row['handler_secret'] && !cmd_row['handler_secret'].empty?
+      req['X-Handler-Secret'] = secret unless blank?(secret)
       req.body = JSON.generate(payload)
 
       response = http.request(req)
@@ -96,8 +152,8 @@ module Services
       rescue StandardError
         {}
       end
-      reply_text = body['text']
-      return unless reply_text && !reply_text.to_s.empty?
+      reply_text = body.is_a?(Hash) ? body['text'] : nil
+      return if blank?(reply_text)
 
       send_text(
         bot,
@@ -107,7 +163,7 @@ module Services
         reply_to: msg['message_id']
       )
     rescue StandardError => e
-      warn "[telegram-handler:#{bot['id']}/#{command}] #{e.class}: #{e.message}"
+      warn "[telegram-handler:#{bot['id']}/#{label}] #{e.class}: #{e.message}"
     end
 
     def send_text(bot, chat_id, text, parse_mode: nil, reply_to: nil)

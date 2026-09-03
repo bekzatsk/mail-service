@@ -62,6 +62,8 @@ Two transports, chosen per bot by `client_telegram_bots.delivery_mode` (`polling
 - **webhook** — Telegram POSTs to `/telegram/webhook/:bot_id`. That route is in `PUBLIC_ROUTES` because Telegram cannot send our `X-Api-Key`; what authenticates it is `X-Telegram-Bot-Api-Secret-Token`, compared against the per-bot `webhook_secret` with `Services::SecureCompare`. No threads, so it survives Passenger suspending an idle process and cannot duplicate across workers. This is the mode production wants.
 - **polling** — `TelegramBotListener` in a thread, as before. The supervisor only starts threads for bots whose `delivery_mode` is `polling`; running both against one bot earns a 409 from Telegram, which is exactly the failure this split avoids.
 
+An inbound update goes to exactly one place. `TelegramUpdateProcessor.parse_command` (pure, tested in `test/telegram_command_parsing_test.rb`) decides whether the text names a command; a matching enabled `telegram_commands` row wins and gets its own `handler_url`. Everything else — plain text, and slash commands with no row — goes to `client_telegram_bots.message_handler_url` (migration 006) with the same payload and reply contract, `command` set to nil for ordinary text. With no message handler configured, a plain message reaches `telegram_messages` and stops there.
+
 `Services::TelegramUpdateProcessor` holds everything that happens *to* an update — log it, match a command, POST to `handler_url`, reply. Both transports call it, so they cannot drift. The transport decides only how an update arrives.
 
 The webhook endpoint answers 200 for anything it accepts, including updates it ignores and updates whose processing raised: a non-2xx makes Telegram redeliver, so a persistent bug would become a retry storm.

@@ -746,6 +746,42 @@ Register a command. `botId` or `botName` optional.
 
 `command` must match `[a-z0-9_]{1,32}` (no leading slash). Auto-syncs the bot's menu via `setMyCommands`. Returns `201`.
 
+### Inbound messages that are not commands
+
+A command reaches the `handler_url` on its own `telegram_commands` row. Anything
+else — ordinary text, and slash commands with no row — reaches the bot's
+**message handler**, if one is set:
+
+```bash
+curl -X PATCH https://email.innlab.kz/telegram/bots/11 \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"messageHandlerUrl": "https://your-project.example/telegram/message",
+       "messageHandlerSecret": "<shared secret>"}'
+```
+
+Without one, a plain message is written to `telegram_messages` and goes no
+further: it is visible in the console and invisible to your project. Send
+`messageHandlerUrl: ""` to go back to that.
+
+The payload and the reply are the same shape as a command's, so one endpoint can
+serve both. `command` is `null` for ordinary text, and carries the name for a
+slash command nothing claimed — which is how you tell a question from a typo:
+
+```json
+{
+  "chatId": -1001234567890,
+  "chatType": "supergroup",
+  "userId": 55512345,
+  "username": "bekzat",
+  "text": "where is my order?",
+  "command": null,
+  "args": null,
+  "messageId": 901,
+  "botId": 11,
+  "botName": "acme-support"
+}
+```
+
 ### Handler protocol
 
 When a Telegram user sends `/status all`, the listener POSTs to `handlerUrl`:

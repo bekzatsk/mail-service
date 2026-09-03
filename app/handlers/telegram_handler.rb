@@ -271,6 +271,24 @@ module Handlers
         sets << 'is_default = ?'; params << (data['isDefault'] ? 1 : 0)
       end
 
+      # Where anything a command row does not claim gets forwarded. Empty string
+      # clears it, which switches plain messages back to log-only.
+      if data.key?('messageHandlerUrl')
+        url = data['messageHandlerUrl'].to_s.strip
+        unless url.empty? || url.start_with?('http://', 'https://')
+          return error('messageHandlerUrl must be an http(s) URL', 400)
+        end
+
+        sets << 'message_handler_url = ?'
+        params << (url.empty? ? nil : url)
+      end
+
+      if data.key?('messageHandlerSecret')
+        secret = data['messageHandlerSecret'].to_s
+        sets << 'message_handler_secret = ?'
+        params << (secret.empty? ? nil : secret)
+      end
+
       return error('No fields to update', 400) if sets.empty?
 
       params << bot_id
@@ -751,6 +769,8 @@ module Handlers
         isEnabled:    row['is_enabled'] == 1 || row['is_enabled'] == true,
         deliveryMode: row['delivery_mode'] || 'polling',
         webhookUrl:   row['webhook_url'],
+        messageHandlerUrl: row['message_handler_url'],
+        hasMessageHandlerSecret: !blank?(row['message_handler_secret']),
         isDefault:    row['is_default'] == 1 || row['is_default'] == true,
         lastError:    row['last_error'],
         lastSeen:     row['last_seen']&.to_s,

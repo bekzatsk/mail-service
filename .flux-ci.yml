@@ -83,6 +83,9 @@ route-auth:
     - ruby test/middleware_routes_test.rb
     # Guards the master key and the Telegram webhook secret token.
     - ruby test/secure_compare_test.rb
+    # Decides whether an inbound message is a command, and so which handler it
+    # reaches.
+    - ruby test/telegram_command_parsing_test.rb
 
 console-smoke:
   stage: test

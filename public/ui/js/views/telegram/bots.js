@@ -196,13 +196,23 @@ async function openEditDialog(api, bot, onDone) {
   const name = el('input', { class: 'input', type: 'text', value: bot.name });
   const token = el('input', { class: 'input input--mono', type: 'password', autocomplete: 'off',
     placeholder: 'Leave blank to keep the current token' });
+  const handlerUrl = el('input', { class: 'input input--mono', type: 'url',
+    value: bot.messageHandlerUrl || '', placeholder: 'https://your-project.example/telegram/message' });
+  const handlerSecret = el('input', { class: 'input input--mono', type: 'password', autocomplete: 'off',
+    placeholder: bot.hasMessageHandlerSecret ? 'Leave blank to keep the stored secret' : '' });
   const error = el('p', { class: 'field__error' });
 
   await openModal({
     title: `Edit ${bot.name}`,
+    wide: true,
     render: () => el('div', { class: 'form-grid' },
       field('Name', name),
       field('Replace bot token', token, 'Only fill this in when rotating the token with @BotFather.'),
+      el('div', { class: 'section__head' }, el('span', { class: 'eyebrow', text: 'Inbound messages' })),
+      el('p', { class: 'mid', text: 'Anything no command claims — ordinary text, and slash commands with no row — is POSTed here. '
+        + 'Without a handler those messages only reach the log. Reply {"text": "..."} to answer in the chat, or with nothing to stay silent.' }),
+      field('Message handler URL', handlerUrl, 'Leave empty to go back to log-only.'),
+      field('Handler secret', handlerSecret, 'Sent as X-Handler-Secret so your endpoint can verify the caller.'),
       error
     ),
     footer: ({ close }) => [
@@ -213,6 +223,15 @@ async function openEditDialog(api, bot, onDone) {
           const payload = {};
           if (name.value.trim() && name.value.trim() !== bot.name) payload.name = name.value.trim();
           if (token.value.trim()) payload.botToken = token.value.trim();
+
+          const url = handlerUrl.value.trim();
+          if (url && !/^https?:\/\//.test(url)) {
+            error.textContent = 'Message handler URL must start with http:// or https://.';
+            return;
+          }
+          if (url !== (bot.messageHandlerUrl || '')) payload.messageHandlerUrl = url;
+          if (handlerSecret.value.trim()) payload.messageHandlerSecret = handlerSecret.value.trim();
+
           if (!Object.keys(payload).length) { error.textContent = 'Nothing to change.'; return; }
           error.textContent = '';
           withBusy(event.currentTarget, async () => {
@@ -274,7 +293,10 @@ function botRow(api, bot, onDone) {
       el('div', { class: 'cell-strong', text: bot.name }),
       el('div', { class: 'cell-sub mono', text: bot.botUsername ? `@${bot.botUsername}` : '—' })
     ),
-    el('td', {}, el('div', { class: 'badge-row' }, botStatus(bot), bot.isDefault ? badge('default', 'info') : null)),
+    el('td', {}, el('div', { class: 'badge-row' },
+      botStatus(bot),
+      bot.isDefault ? badge('default', 'info') : null,
+      bot.messageHandlerUrl ? badge('msg handler', 'info') : null)),
     el('td', {}, transportBadge(bot)),
     el('td', { class: 'dim nowrap', text: bot.lastSeen ? relativeTime(bot.lastSeen) : 'never' }),
     el('td', {}, bot.lastError
