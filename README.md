@@ -248,6 +248,84 @@ can reach you (a climbing `pendingUpdateCount` and a `lastErrorMessage` mean it
 cannot), and **Telegram → Messages** in the console shows what was attempted and
 why it failed.
 
+### What a calling project actually sends
+
+Everything above is setup, done once. Day to day a project makes three kinds of
+request and answers one. This is the whole surface it needs — the rest of
+[API_README.md](API_README.md) is for whoever administers the service.
+
+**Send to a named destination.** The common case:
+
+```http
+POST /telegram/messages
+X-Api-Key: <client-key>
+Content-Type: application/json
+
+{"route": "errors", "text": "NullPointerException in OrderService"}
+```
+
+```json
+{ "id": 42, "telegramMessageId": 902, "status": "sent" }
+```
+
+Optional: `parseMode` (`HTML` or `MarkdownV2`), `replyToMessageId`,
+`disableNotification`. Use `chatId` instead of `route` to address a chat
+directly.
+
+What can come back instead:
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| `400` | `Missing required field: route or chatId` | neither was given |
+| `404` | `Unknown route 'errors'` | the name is not registered — check `GET /telegram/routes` |
+| `409` | `Route 'errors' exists on more than one bot …` | add `botId`; the service will not guess |
+| `400` | `Bot is disabled` | the bot is switched off in the console |
+| `500` | `Failed to send message` + `details` | Telegram rejected it; `details` carries its reason |
+| `403` | `Invalid API key` | wrong or revoked client key |
+
+**Send mail.** Same key, same shape:
+
+```http
+POST /send
+X-Api-Key: <client-key>
+
+{"to": "someone@example.com", "subject": "Hello", "body": "<h1>Hi</h1>"}
+```
+
+```json
+{ "message": "Email sent successfully" }
+```
+
+Failures answer `500` with `details` holding the SMTP error. Either way the
+attempt is in `mail_logs`.
+
+**Answer an inbound message.** Your `messageHandlerUrl` (and any command's
+`handler_url`) receives a POST with `X-Handler-Secret` and the payload shown
+under [Inbound: where updates go](#inbound-where-updates-go). Answer within ten
+seconds:
+
+```json
+{ "text": "Order #148 is on its way", "parseMode": "HTML" }
+```
+
+Return `{}` — or anything with no `text` — and the bot says nothing. That is the
+normal answer for a message that does not need a reply.
+
+**Look up the destinations**, if the project wants to check its own config at
+boot rather than fail at the first send:
+
+```http
+GET /telegram/routes
+X-Api-Key: <client-key>
+```
+
+```json
+{ "routes": [
+  { "route": "errors", "chatId": -1001234567890, "title": "Acme errors",
+    "chatType": "supergroup", "botId": 11, "botName": "acme-support" }
+] }
+```
+
 ## Admin console
 
 A web console at **`/ui/`** (`/` redirects there). Plain HTML, CSS and ES
