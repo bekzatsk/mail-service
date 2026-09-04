@@ -167,6 +167,87 @@ caller.
 Registered commands are pushed to Telegram's command menu automatically
 (`setMyCommands`) whenever you add, edit or remove one.
 
+### Setting one up
+
+From nothing to a bot that posts errors into a group and answers questions.
+Every step has a console equivalent — **Telegram → Bots / Chats** — so the curl
+is here to show what the console does, not because you have to type it.
+
+**1. Create the bot.** Talk to [@BotFather](https://t.me/BotFather) in Telegram,
+`/newbot`, and keep the token it gives you. That token is the bot; anyone holding
+it controls it.
+
+**2. Connect it to this service.** The token is verified against Telegram before
+anything is stored, and stored encrypted:
+
+```bash
+curl -X POST https://your-host/telegram/bots \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"name": "acme-support", "botToken": "123456:AA...", "isDefault": true}'
+```
+
+`name` is your own label and must be unique for the client. The response carries
+the bot's numeric `id` — the next steps need it.
+
+**3. Put the bot in the group** and give it permission to post. For a group
+where it should read messages too, turn off privacy mode in BotFather
+(`/setprivacy` → Disable), otherwise it only sees messages addressed to it.
+
+**4. Find the group's chat id.** It is negative for groups and supergroups.
+Easiest is to forward a message from the group to
+[@userinfobot](https://t.me/userinfobot). Or, once the bot is in the group and
+inbound is running, write anything there and read the id off
+**Telegram → Messages** in the console.
+
+**5. Register the group and name a route:**
+
+```bash
+curl -X POST https://your-host/telegram/chats \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"botId": 11, "chatId": -1001234567890, "chatType": "supergroup",
+       "title": "Acme errors", "routeName": "errors"}'
+```
+
+Repeat for every destination — `reports`, `deploys`, whatever the project needs.
+From here on, callers use the name and never the id.
+
+**6. Switch it to webhook** so inbound survives the app going idle:
+
+```bash
+curl -X POST https://your-host/telegram/bots/11/webhook \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"baseUrl": "https://your-host"}'
+```
+
+Skip this if the bot only ever sends and nobody talks to it — outbound needs no
+transport at all.
+
+**7. Point inbound at your project**, if you want to receive anything:
+
+```bash
+curl -X PATCH https://your-host/telegram/bots/11 \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"messageHandlerUrl": "https://your-project.example/telegram/message",
+       "messageHandlerSecret": "<shared secret>"}'
+```
+
+Add slash commands with `POST /telegram/commands` if some inputs deserve their
+own endpoint; anything they do not claim falls through to the handler above.
+
+**8. Send something:**
+
+```bash
+curl -X POST https://your-host/telegram/messages \
+  -H "X-Api-Key: <client-key>" -H "Content-Type: application/json" \
+  -d '{"route": "errors", "text": "NullPointerException in OrderService"}'
+```
+
+If it does not arrive, the useful checks in order: `GET /telegram/routes` shows
+whether the name resolves, `GET /telegram/bots/11/webhook` shows whether Telegram
+can reach you (a climbing `pendingUpdateCount` and a `lastErrorMessage` mean it
+cannot), and **Telegram → Messages** in the console shows what was attempted and
+why it failed.
+
 ## Admin console
 
 A web console at **`/ui/`** (`/` redirects there). Plain HTML, CSS and ES
