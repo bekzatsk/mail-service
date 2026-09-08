@@ -15,6 +15,28 @@ module Handlers
     # A route is the address a calling project uses instead of a chat id, so it
     # has to be typed by hand into someone else's config: lowercase, no spaces.
     ROUTE_NAME_PATTERN = /\A[a-z0-9][a-z0-9_-]{0,63}\z/
+
+    # Every read of a bot goes through these two fragments so no query can
+    # forget that a granted organization is allowed in. Both expect the
+    # caller's organization id as the first bind parameter (the LEFT JOIN),
+    # and again wherever BOT_ACCESS is interpolated.
+    BOT_SOURCE = <<~SQL.freeze
+      SELECT b.*, oc.organization_id AS owner_organization_id, oo.name AS owner_organization_name
+        FROM client_telegram_bots b
+        JOIN clients oc ON oc.id = b.client_id
+        JOIN organizations oo ON oo.id = oc.organization_id
+        LEFT JOIN telegram_bot_grants g ON g.bot_id = b.id AND g.organization_id = ?
+    SQL
+
+    # Same joins, hung off a child table (chats, commands) instead of selected.
+    BOT_JOIN_FOR_CHILD = <<~SQL.freeze
+      JOIN client_telegram_bots b ON b.id = c.bot_id
+      JOIN clients oc ON oc.id = b.client_id
+      LEFT JOIN telegram_bot_grants g ON g.bot_id = b.id AND g.organization_id = ?
+    SQL
+
+    BOT_ACCESS = '(oc.organization_id = ? OR g.id IS NOT NULL)'
+
     def initialize
       @encryption   = Services::EncryptionService.new
       @telegram     = Services::TelegramService.new
@@ -65,7 +87,7 @@ module Handlers
 
     # POST /telegram/bots/:id/webhook — switch this bot to webhook delivery.
     def enable_webhook(request, client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = owner_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       data = parse_json(request)
@@ -101,7 +123,7 @@ module Handlers
 
     # DELETE /telegram/bots/:id/webhook — back to long polling.
     def disable_webhook(client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = owner_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       token = @encryption.decrypt(bot['bot_token'])
@@ -124,7 +146,7 @@ module Handlers
 
     # GET /telegram/bots/:id/webhook — what Telegram thinks is registered.
     def webhook_info(client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = owner_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       token = @encryption.decrypt(bot['bot_token'])
@@ -216,28 +238,26 @@ module Handlers
 
       Services::TelegramBotSupervisor.instance.start(bot_id)
 
-      json({ bot: serialize_bot(load_bot(bot_id)) }, 201)
+      json({ bot: serialize_bot(load_bot(bot_id), client: client) }, 201)
     end
 
     # GET /telegram/bots
     def list_bots(client)
-      rows = Services::Database.query(
-        'SELECT * FROM client_telegram_bots WHERE client_id = ? ORDER BY created_at ASC',
-        [client['id']]
-      )
-      json({ bots: rows.map { |r| serialize_bot(r) } })
+      rows = accessible_bots(client).to_a
+      grants = grants_by_bot(rows.map { |row| row['id'] })
+      json({ bots: rows.map { |row| serialize_bot(row, client: client, grants: grants[row['id']] || []) } })
     end
 
     # GET /telegram/bots/:id
     def show_bot(client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = accessible_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
-      json({ bot: serialize_bot(bot) })
+      json({ bot: serialize_bot(bot, client: client, grants: load_grants([bot['id']])) })
     end
 
     # PATCH /telegram/bots/:id
     def update_bot(request, client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = owner_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       data = parse_json(request)
@@ -298,9 +318,11 @@ module Handlers
       )
 
       if data['isDefault'] == true
+        # Scoped to the bot's owning client, not to whoever in the
+        # organization is doing the editing.
         Services::Database.query(
           'UPDATE client_telegram_bots SET is_default = FALSE WHERE client_id = ? AND id != ?',
-          [client['id'], bot_id]
+          [bot['client_id'], bot_id]
         )
       end
 
@@ -320,7 +342,7 @@ module Handlers
 
     # DELETE /telegram/bots/:id
     def delete_bot(client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = owner_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       Services::TelegramBotSupervisor.instance.stop(bot_id)
@@ -330,11 +352,97 @@ module Handlers
 
     # POST /telegram/bots/:id/sync-commands
     def sync_commands(client, bot_id)
-      bot = find_client_bot(client, bot_id)
+      bot = accessible_bot(client, bot_id)
       return error('Bot not found', 404) unless bot
 
       ok = @command_sync.sync!(bot['id'])
       json({ success: ok })
+    end
+
+    # ── Grants: lending a bot to another organization ──────────────────
+    #
+    # The bot row stays with its owner. A token and a webhook are one-per-bot
+    # globals at Telegram, so two organizations cannot both hold them, and
+    # deleting the bot is not something a borrower should be able to do.
+    #
+    # Everything hanging off the bot is shared: the grantee registers its own
+    # chats and routes, edits commands, and sends. It also sees the rest of the
+    # bot's traffic — the honest cost of two organizations sharing one Telegram
+    # identity, and the reason a grant is an operator decision rather than a
+    # self-service one.
+
+    # GET /telegram/bots/:id/grants
+    def list_grants(client, bot_id)
+      bot = owner_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      json({ grants: load_grants([bot_id]).map { |row| serialize_grant(row) } })
+    end
+
+    # POST /telegram/bots/:id/grants
+    def create_grant(request, client, bot_id)
+      bot = owner_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      grant_to(bot, parse_json(request))
+    end
+
+    # DELETE /telegram/bots/:id/grants/:grant_id
+    def delete_grant(client, bot_id, grant_id)
+      bot = owner_bot(client, bot_id)
+      return error('Bot not found', 404) unless bot
+
+      revoke_grant(grant_id, bot_id: bot_id)
+    end
+
+    # ── Grants, master key ─────────────────────────────────────────────
+    # Same table, seen across every client rather than one owner's bots.
+
+    # GET /admin/telegram/grants
+    def admin_list_grants(request)
+      params = request.params
+      conditions = []
+      values = []
+
+      if params['botId']
+        conditions << 'g.bot_id = ?'
+        values << params['botId'].to_i
+      end
+      if params['organizationId']
+        conditions << 'g.organization_id = ?'
+        values << params['organizationId'].to_i
+      end
+      where = conditions.empty? ? '' : "WHERE #{conditions.join(' AND ')}"
+
+      rows = Services::Database.query(
+        "SELECT g.*, o.name AS organization_name, o.slug AS organization_slug,
+                b.name AS bot_name, b.bot_username,
+                oc.organization_id AS owner_organization_id, oo.name AS owner_organization_name
+           FROM telegram_bot_grants g
+           JOIN organizations o ON o.id = g.organization_id
+           JOIN client_telegram_bots b ON b.id = g.bot_id
+           JOIN clients oc ON oc.id = b.client_id
+           JOIN organizations oo ON oo.id = oc.organization_id
+           #{where}
+          ORDER BY b.name, o.name", values
+      )
+      json({ grants: rows.map { |row| serialize_grant(row) } })
+    end
+
+    # POST /admin/telegram/grants
+    def admin_create_grant(request)
+      data = parse_json(request)
+      return error('Missing required field: botId', 400) if data['botId'].nil?
+
+      bot = load_bot(data['botId'].to_i)
+      return error('Bot not found', 404) unless bot
+
+      grant_to(bot, data)
+    end
+
+    # DELETE /admin/telegram/grants/:id
+    def admin_delete_grant(grant_id)
+      revoke_grant(grant_id)
     end
 
     # ── Messages ───────────────────────────────────────────────────────
@@ -355,10 +463,10 @@ module Handlers
       unless blank?(data['route'])
         route = normalize_route(data['route'])
         matches = Services::Database.query(
-          'SELECT c.*, b.id AS resolved_bot_id
-             FROM telegram_chats c
-             JOIN client_telegram_bots b ON b.id = c.bot_id
-            WHERE b.client_id = ? AND c.route_name = ?', [client['id'], route]
+          "SELECT c.*, b.id AS resolved_bot_id
+             FROM telegram_chats c #{BOT_JOIN_FOR_CHILD}
+            WHERE #{BOT_ACCESS} AND c.route_name = ?",
+          [client['organization_id'], client['organization_id'], route]
         )
 
         return error("Unknown route '#{route}'", 404) if matches.empty?
@@ -414,8 +522,11 @@ module Handlers
     # GET /telegram/messages
     def list_messages(request, client)
       params = request.params
-      conditions = ['client_id = ?']
-      values = [client['id']]
+      bot_ids = accessible_bot_ids(client)
+      return json({ messages: [] }) if bot_ids.empty?
+
+      conditions = ["bot_id IN (#{bot_ids.map { '?' }.join(',')})"]
+      values = bot_ids.dup
 
       if params['botId']
         conditions << 'bot_id = ?'
@@ -440,9 +551,12 @@ module Handlers
 
     # GET /telegram/messages/:id
     def show_message(client, msg_id)
+      bot_ids = accessible_bot_ids(client)
+      return error('Message not found', 404) if bot_ids.empty?
+
       row = Services::Database.query(
-        'SELECT * FROM telegram_messages WHERE id = ? AND client_id = ?',
-        [msg_id, client['id']]
+        "SELECT * FROM telegram_messages WHERE id = ? AND bot_id IN (#{bot_ids.map { '?' }.join(',')})",
+        [msg_id, *bot_ids]
       ).first
       return error('Message not found', 404) unless row
       json({ message: serialize_message(row) })
@@ -504,7 +618,7 @@ module Handlers
     def list_chats(request, client)
       params = request.params
       rows = if params['botId']
-               bot = find_client_bot(client, params['botId'].to_i)
+               bot = accessible_bot(client, params['botId'].to_i)
                return error('Bot not found', 404) unless bot
                Services::Database.query(
                  'SELECT * FROM telegram_chats WHERE bot_id = ? ORDER BY created_at DESC',
@@ -512,8 +626,9 @@ module Handlers
                )
              else
                Services::Database.query(
-                 'SELECT c.* FROM telegram_chats c JOIN client_telegram_bots b ON b.id = c.bot_id WHERE b.client_id = ? ORDER BY c.created_at DESC',
-                 [client['id']]
+                 "SELECT c.* FROM telegram_chats c #{BOT_JOIN_FOR_CHILD}
+                   WHERE #{BOT_ACCESS} ORDER BY c.created_at DESC",
+                 [client['organization_id'], client['organization_id']]
                )
              end
       json({ chats: rows.map { |r| serialize_chat(r) } })
@@ -564,11 +679,11 @@ module Handlers
     # The address book a calling project needs: which name reaches which group.
     def list_routes(client)
       rows = Services::Database.query(
-        'SELECT c.*, b.name AS bot_name, b.bot_username
-           FROM telegram_chats c
-           JOIN client_telegram_bots b ON b.id = c.bot_id
-          WHERE b.client_id = ? AND c.route_name IS NOT NULL
-          ORDER BY c.route_name', [client['id']]
+        "SELECT c.*, b.name AS bot_name, b.bot_username
+           FROM telegram_chats c #{BOT_JOIN_FOR_CHILD}
+          WHERE #{BOT_ACCESS} AND c.route_name IS NOT NULL
+          ORDER BY c.route_name",
+        [client['organization_id'], client['organization_id']]
       )
 
       json({
@@ -588,8 +703,9 @@ module Handlers
     # DELETE /telegram/chats/:id
     def delete_chat(client, chat_pk)
       row = Services::Database.query(
-        'SELECT c.* FROM telegram_chats c JOIN client_telegram_bots b ON b.id = c.bot_id WHERE c.id = ? AND b.client_id = ?',
-        [chat_pk, client['id']]
+        "SELECT c.* FROM telegram_chats c #{BOT_JOIN_FOR_CHILD}
+          WHERE c.id = ? AND #{BOT_ACCESS}",
+        [client['organization_id'], chat_pk, client['organization_id']]
       ).first
       return error('Chat not found', 404) unless row
 
@@ -636,7 +752,7 @@ module Handlers
     def list_commands(request, client)
       params = request.params
       rows = if params['botId']
-               bot = find_client_bot(client, params['botId'].to_i)
+               bot = accessible_bot(client, params['botId'].to_i)
                return error('Bot not found', 404) unless bot
                Services::Database.query(
                  'SELECT * FROM telegram_commands WHERE bot_id = ? ORDER BY command ASC',
@@ -644,8 +760,9 @@ module Handlers
                )
              else
                Services::Database.query(
-                 'SELECT c.* FROM telegram_commands c JOIN client_telegram_bots b ON b.id = c.bot_id WHERE b.client_id = ? ORDER BY c.command ASC',
-                 [client['id']]
+                 "SELECT c.* FROM telegram_commands c #{BOT_JOIN_FOR_CHILD}
+                   WHERE #{BOT_ACCESS} ORDER BY c.command ASC",
+                 [client['organization_id'], client['organization_id']]
                )
              end
       json({ commands: rows.map { |r| serialize_command(r) } })
@@ -700,18 +817,54 @@ module Handlers
 
     private
 
-    def find_client_bot(client, bot_id)
+    # ── Access model ───────────────────────────────────────────────────
+    #
+    # A bot belongs to the organization of the client that connected it.
+    # Every client in that organization owns it: rotate the token, switch
+    # transport, delete it.
+    #
+    # A grant hands another organization everything hanging off the bot —
+    # chats, routes, commands, message history, sending. The bot row itself
+    # stays with the owner, because a token and a webhook are one-per-bot
+    # globals at Telegram and two organizations cannot both hold them.
+
+    # Owner rights: the bot's own organization only. Grants do not reach here.
+    def owner_bot(client, bot_id)
       Services::Database.query(
-        'SELECT * FROM client_telegram_bots WHERE id = ? AND client_id = ?',
-        [bot_id, client['id']]
+        'SELECT b.*, oc.organization_id AS owner_organization_id, oo.name AS owner_organization_name
+           FROM client_telegram_bots b
+           JOIN clients oc ON oc.id = b.client_id
+           JOIN organizations oo ON oo.id = oc.organization_id
+          WHERE b.id = ? AND oc.organization_id = ?',
+        [bot_id, client['organization_id']]
       ).first
+    end
+
+    # Owner or grantee.
+    def accessible_bot(client, bot_id)
+      Services::Database.query(
+        "#{BOT_SOURCE} WHERE b.id = ? AND #{BOT_ACCESS}",
+        [client['organization_id'], bot_id, client['organization_id']]
+      ).first
+    end
+
+    def accessible_bots(client)
+      Services::Database.query(
+        "#{BOT_SOURCE} WHERE #{BOT_ACCESS} ORDER BY b.created_at DESC",
+        [client['organization_id'], client['organization_id']]
+      )
+    end
+
+    # Ids only, for the queries that filter a child table by bot.
+    def accessible_bot_ids(client)
+      accessible_bots(client).map { |row| row['id'] }
     end
 
     def find_client_chat(client, chat_pk)
       Services::Database.query(
-        'SELECT c.* FROM telegram_chats c
-           JOIN client_telegram_bots b ON b.id = c.bot_id
-          WHERE c.id = ? AND b.client_id = ?', [chat_pk, client['id']]
+        "SELECT c.* FROM telegram_chats c #{BOT_JOIN_FOR_CHILD}
+          WHERE c.id = ? AND #{BOT_ACCESS}",
+        [client['organization_id'], chat_pk, client['organization_id']]
       ).first
     end
 
@@ -732,36 +885,133 @@ module Handlers
 
     def find_client_command(client, cmd_id)
       Services::Database.query(
-        'SELECT c.* FROM telegram_commands c JOIN client_telegram_bots b ON b.id = c.bot_id WHERE c.id = ? AND b.client_id = ?',
-        [cmd_id, client['id']]
+        "SELECT c.* FROM telegram_commands c #{BOT_JOIN_FOR_CHILD}
+          WHERE c.id = ? AND #{BOT_ACCESS}",
+        [client['organization_id'], cmd_id, client['organization_id']]
       ).first
     end
 
     def load_bot(bot_id)
       Services::Database.query(
-        'SELECT * FROM client_telegram_bots WHERE id = ?', [bot_id]
+        'SELECT b.*, oc.organization_id AS owner_organization_id, oo.name AS owner_organization_name
+           FROM client_telegram_bots b
+           JOIN clients oc ON oc.id = b.client_id
+           JOIN organizations oo ON oo.id = oc.organization_id
+          WHERE b.id = ?', [bot_id]
       ).first
     end
 
-    # Resolves a bot from {botId} → {botName} → default. Always scoped to client.
-    def resolve_bot(client, data)
-      if data['botId']
-        find_client_bot(client, data['botId'].to_i)
-      elsif data['botName'] && !data['botName'].to_s.empty?
+    # ── Grant plumbing ─────────────────────────────────────────────────
+
+    def load_grants(bot_ids)
+      return [] if bot_ids.empty?
+
+      Services::Database.query(
+        "SELECT g.*, o.name AS organization_name, o.slug AS organization_slug
+           FROM telegram_bot_grants g
+           JOIN organizations o ON o.id = g.organization_id
+          WHERE g.bot_id IN (#{bot_ids.map { '?' }.join(',')})
+          ORDER BY o.name", bot_ids
+      ).to_a
+    end
+
+    def grants_by_bot(bot_ids)
+      load_grants(bot_ids).group_by { |row| row['bot_id'] }
+    end
+
+    # Shared by the owner-key and master-key entry points: same table, same
+    # rules, two doors.
+    def grant_to(bot, data)
+      org = find_organization(data)
+      return error('Organization not found — pass organizationId or organizationSlug', 404) unless org
+
+      if org['id'] == bot['owner_organization_id']
+        return error('That organization already owns this bot', 400)
+      end
+
+      existing = Services::Database.query(
+        'SELECT id FROM telegram_bot_grants WHERE bot_id = ? AND organization_id = ?',
+        [bot['id'], org['id']]
+      ).first
+      return error("#{org['name']} already has access to this bot", 409) if existing
+
+      Services::Database.query(
+        'INSERT INTO telegram_bot_grants (bot_id, organization_id) VALUES (?, ?)',
+        [bot['id'], org['id']]
+      )
+      row = load_grants([bot['id']]).find { |g| g['organization_id'] == org['id'] }
+      json({ grant: serialize_grant(row) }, 201)
+    end
+
+    def revoke_grant(grant_id, bot_id: nil)
+      conditions = ['id = ?']
+      values = [grant_id]
+      if bot_id
+        conditions << 'bot_id = ?'
+        values << bot_id
+      end
+
+      row = Services::Database.query(
+        "SELECT * FROM telegram_bot_grants WHERE #{conditions.join(' AND ')}", values
+      ).first
+      return error('Grant not found', 404) unless row
+
+      Services::Database.query('DELETE FROM telegram_bot_grants WHERE id = ?', [row['id']])
+      json({ message: 'Access revoked' })
+    end
+
+    def find_organization(data)
+      if data['organizationId']
         Services::Database.query(
-          'SELECT * FROM client_telegram_bots WHERE client_id = ? AND name = ?',
-          [client['id'], data['botName'].to_s]
+          'SELECT * FROM organizations WHERE id = ?', [data['organizationId'].to_i]
         ).first
-      else
+      elsif !blank?(data['organizationSlug'])
         Services::Database.query(
-          'SELECT * FROM client_telegram_bots WHERE client_id = ? AND is_default = TRUE',
-          [client['id']]
+          'SELECT * FROM organizations WHERE slug = ?', [data['organizationSlug'].to_s.strip]
         ).first
       end
     end
 
-    def serialize_bot(row)
-      {
+    def serialize_grant(row)
+      payload = {
+        id:               row['id'],
+        botId:            row['bot_id'],
+        organizationId:   row['organization_id'],
+        organizationName: row['organization_name'],
+        organizationSlug: row['organization_slug'],
+        createdAt:        row['created_at']&.to_s
+      }
+      payload[:botName] = row['bot_name'] if row.key?('bot_name')
+      payload[:botUsername] = row['bot_username'] if row.key?('bot_username')
+      payload[:ownerOrganizationName] = row['owner_organization_name'] if row.key?('owner_organization_name')
+      payload
+    end
+
+    # Resolves a bot from {botId} → {botName} → default. Always scoped to client.
+    def resolve_bot(client, data)
+      # A bot name is unique per client, not across the grants an organization
+      # holds, so own bots win over granted ones when both answer to the name.
+      own_first = 'ORDER BY (oc.organization_id = ?) DESC, b.id ASC'
+      org = client['organization_id']
+
+      if data['botId']
+        accessible_bot(client, data['botId'].to_i)
+      elsif data['botName'] && !data['botName'].to_s.empty?
+        Services::Database.query(
+          "#{BOT_SOURCE} WHERE #{BOT_ACCESS} AND b.name = ? #{own_first}",
+          [org, org, data['botName'].to_s, org]
+        ).first
+      else
+        Services::Database.query(
+          "#{BOT_SOURCE} WHERE #{BOT_ACCESS} AND b.is_default = TRUE #{own_first}",
+          [org, org, org]
+        ).first
+      end
+    end
+
+    def serialize_bot(row, client: nil, grants: nil)
+      owner_org = row['owner_organization_id']
+      payload = {
         id:           row['id'],
         name:         row['name'],
         botUsername:  row['bot_username'],
@@ -775,8 +1025,15 @@ module Handlers
         lastError:    row['last_error'],
         lastSeen:     row['last_seen']&.to_s,
         createdAt:    row['created_at']&.to_s,
-        updatedAt:    row['updated_at']&.to_s
+        updatedAt:    row['updated_at']&.to_s,
+        ownerOrganizationId:   owner_org,
+        ownerOrganizationName: row['owner_organization_name']
       }
+      # isOwner is what the console keys the owner-only actions off, so it is
+      # answered here rather than left to the client to infer.
+      payload[:isOwner] = (owner_org == client['organization_id']) if client && !owner_org.nil?
+      payload[:grants]  = grants.map { |g| serialize_grant(g) } if grants
+      payload
     end
 
     def serialize_chat(row)

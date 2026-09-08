@@ -52,15 +52,22 @@ const LOGS = Array.from({ length: 140 }, (_, i) => {
 });
 
 const BOTS = [
+  // Owned by the selected client's organization, and lent to Globex.
   { id: 11, name: 'acme-support', botUsername: 'acme_support_bot', botId: 7712345, isEnabled: true,
     isDefault: true, deliveryMode: 'webhook', webhookUrl: 'https://email.innlab.kz/telegram/webhook/11',
     messageHandlerUrl: 'https://acme.example/telegram/message', hasMessageHandlerSecret: true,
-    lastError: null, lastSeen: '2026-08-31 10:44:00', createdAt: '2026-05-28 21:00:00', updatedAt: '2026-08-31 10:44:00' },
+    lastError: null, lastSeen: '2026-08-31 10:44:00', createdAt: '2026-05-28 21:00:00', updatedAt: '2026-08-31 10:44:00',
+    ownerOrganizationId: 1, ownerOrganizationName: 'Acme Corporation', isOwner: true,
+    grants: [{ id: 1, botId: 11, organizationId: 2, organizationName: 'Globex',
+               organizationSlug: 'globex', createdAt: '2026-08-20 11:00:00' }] },
+  // Borrowed: owned by Globex, granted to this organization. Owner-only
+  // actions must not render for it.
   { id: 12, name: 'acme-alerts', botUsername: 'acme_alerts_bot', botId: 7798765, isEnabled: false,
     isDefault: false, deliveryMode: 'polling', webhookUrl: null,
     messageHandlerUrl: null, hasMessageHandlerSecret: false,
     lastError: 'Conflict: terminated by other getUpdates request',
-    lastSeen: '2026-08-29 08:10:00', createdAt: '2026-06-14 12:00:00', updatedAt: '2026-08-29 08:10:00' }
+    lastSeen: '2026-08-29 08:10:00', createdAt: '2026-06-14 12:00:00', updatedAt: '2026-08-29 08:10:00',
+    ownerOrganizationId: 2, ownerOrganizationName: 'Globex', isOwner: false, grants: [] }
 ];
 
 const COMMANDS = [
@@ -163,6 +170,10 @@ export function createServer() {
     if (req.method === 'GET' && pathname.startsWith('/telegram')) {
       if (!CLIENTS.some((c) => c.apiKey === key)) return json(res, { error: 'Invalid API key' }, 403);
       if (pathname === '/telegram/bots') return json(res, { bots: BOTS });
+      if (/^\/telegram\/bots\/\d+\/grants$/.test(pathname)) {
+        const botId = Number(pathname.split('/')[3]);
+        return json(res, { grants: (BOTS.find((b) => b.id === botId)?.grants) || [] });
+      }
       if (pathname === '/telegram/commands') return json(res, { commands: COMMANDS });
       if (pathname === '/telegram/chats') return json(res, { chats: CHATS });
       if (pathname === '/telegram/routes') {

@@ -78,7 +78,11 @@ export function admin(masterKey) {
     testClient:    (id) => call(`/admin/clients/${id}/test`, { method: 'POST' }),
     testSmtp:      (body) => call('/config/test', { method: 'POST', body }),
 
-    logs:          (params) => call(`/admin/logs${query(params)}`)
+    logs:          (params) => call(`/admin/logs${query(params)}`),
+
+    telegramGrants:       (params) => call(`/admin/telegram/grants${query(params)}`),
+    createTelegramGrant:  (body) => call('/admin/telegram/grants', { method: 'POST', body }),
+    deleteTelegramGrant:  (id) => call(`/admin/telegram/grants/${id}`, { method: 'DELETE' })
   };
 }
 
@@ -96,6 +100,12 @@ export function client(apiKey) {
     updateBot:     (id, body) => call(`/telegram/bots/${id}`, { method: 'PATCH', body }),
     deleteBot:     (id) => call(`/telegram/bots/${id}`, { method: 'DELETE' }),
     syncCommands:  (id) => call(`/telegram/bots/${id}/sync-commands`, { method: 'POST' }),
+
+    // Which other organizations may use this bot. Owner-only — the service
+    // answers 404 for a bot the caller merely borrows.
+    botGrants:     (id) => call(`/telegram/bots/${id}/grants`),
+    grantBot:      (id, body) => call(`/telegram/bots/${id}/grants`, { method: 'POST', body }),
+    revokeBotGrant: (id, grantId) => call(`/telegram/bots/${id}/grants/${grantId}`, { method: 'DELETE' }),
 
     webhookInfo:    (id) => call(`/telegram/bots/${id}/webhook`),
     enableWebhook:  (id, body) => call(`/telegram/bots/${id}/webhook`, { method: 'POST', body }),

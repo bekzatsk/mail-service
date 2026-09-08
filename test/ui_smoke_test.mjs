@@ -96,6 +96,27 @@ try {
     check(`telegram/${label.toLowerCase()}: renders ${expected} row(s)`, count === expected, `got ${count}`);
   }
 
+  // ── Grants: the owner-only actions must not render on a borrowed bot ──
+  // The fixture ships one owned bot and one granted to this organization; if
+  // the row ever stopped telling them apart, a borrower would be offered a
+  // Delete button that answers 404.
+  await page.click('button.tab:text-is("Bots")');
+  await page.waitForSelector('.table tbody tr');
+  const ownedRow = page.locator('.table tbody tr', { hasText: 'acme-support' });
+  const borrowedRow = page.locator('.table tbody tr', { hasText: 'acme-alerts' });
+  check('telegram/bots: owned bot offers Access',
+    await ownedRow.locator('button:text-is("Access · 1")').count() === 1);
+  check('telegram/bots: borrowed bot is labelled',
+    (await borrowedRow.innerText()).includes('shared by Globex'));
+  check('telegram/bots: borrowed bot offers no Delete',
+    await borrowedRow.locator('button:text-is("Delete")').count() === 0);
+
+  await ownedRow.locator('button:text-is("Access · 1")').click();
+  await page.waitForSelector('.modal');
+  const modalText = await page.locator('.modal').innerText();
+  check('telegram/bots: access dialog lists the grantee', modalText.includes('Globex'));
+  await page.keyboard.press('Escape');
+
   // ── A modal opens, closes on Escape, and a key can be revealed ──
   console.log('\nInteractions');
   await page.goto(`${BASE}/ui/#/clients`, { waitUntil: 'domcontentloaded' });

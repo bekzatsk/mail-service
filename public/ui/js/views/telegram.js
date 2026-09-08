@@ -24,7 +24,7 @@ function noClientScoped() {
     ),
     emptyState(
       'No client selected',
-      'Telegram bots belong to a client, not to an organization. Pick a client in the header to manage its bots.',
+      'A bot is connected by a client and owned by that client\u2019s organization. Pick a client in the header to see the bots it can reach.',
       el('button', { class: 'btn btn--primary', type: 'button', text: 'Go to clients', onclick: () => navigate('clients') })
     )
   );
@@ -84,9 +84,9 @@ export async function render() {
       el('div', {},
         el('span', { class: 'eyebrow', text: 'Gateway' }),
         el('h1', { class: 'view__title', text: 'Telegram' }),
-        el('p', { class: 'view__sub' }, 'Bots owned by ',
+        el('p', { class: 'view__sub' }, 'Bots reachable by ',
           el('span', { class: 'mono', text: current.fromAddress }),
-          '. Each enabled bot runs a long-poll listener inside the service process.')
+          ' \u2014 the ones its organization owns, plus any granted to it. Each enabled polling bot runs a listener inside the service process.')
       )
     ),
     tabs,

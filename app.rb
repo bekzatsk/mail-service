@@ -124,6 +124,20 @@ class App < Sinatra::Base
     emit admin_handler.logs(request)
   end
 
+  # Telegram bot grants, seen across every client. The grant logic itself lives
+  # in TelegramHandler — one table, one set of rules, two doors into it.
+  get '/admin/telegram/grants' do
+    emit telegram_handler.admin_list_grants(request)
+  end
+
+  post '/admin/telegram/grants' do
+    emit telegram_handler.admin_create_grant(request)
+  end
+
+  delete '/admin/telegram/grants/:id' do
+    emit telegram_handler.admin_delete_grant(params['id'].to_i)
+  end
+
   # ── Routes: Mail (protected — X-Api-Key via middleware) ────────────
 
   post '/send' do
@@ -183,6 +197,19 @@ class App < Sinatra::Base
 
   post '/telegram/bots/:id/sync-commands' do
     emit telegram_handler.sync_commands(env['mail_service.client'], params['id'].to_i)
+  end
+
+  # Grants — who else may use this bot. Owner-only: the bot's own organization.
+  get '/telegram/bots/:id/grants' do
+    emit telegram_handler.list_grants(env['mail_service.client'], params['id'].to_i)
+  end
+
+  post '/telegram/bots/:id/grants' do
+    emit telegram_handler.create_grant(request, env['mail_service.client'], params['id'].to_i)
+  end
+
+  delete '/telegram/bots/:id/grants/:grant_id' do
+    emit telegram_handler.delete_grant(env['mail_service.client'], params['id'].to_i, params['grant_id'].to_i)
   end
 
   # Messages

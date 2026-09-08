@@ -76,7 +76,10 @@ puts "\nMaster-only — organizations, client config, and the whole admin surfac
   ['GET',    '/admin/logs'],
   ['PATCH',  '/admin/clients/1'],
   ['DELETE', '/admin/organizations/2'],
-  ['POST',   '/admin/clients/1/rotate-key']
+  ['POST',   '/admin/clients/1/rotate-key'],
+  ['GET',    '/admin/telegram/grants'],
+  ['POST',   '/admin/telegram/grants'],
+  ['DELETE', '/admin/telegram/grants/4']
 ].each do |method, path|
   expect(middleware, method, path, nil,        401) # no key at all
   expect(middleware, method, path, 'nonsense', 403) # wrong key
@@ -103,7 +106,12 @@ puts "\nClient-only — sending and the Telegram gateway"
   ['POST', '/telegram/messages'],
   ['GET',  '/telegram/commands'],
   ['GET',  '/telegram/routes'],
-  ['PATCH', '/telegram/chats/9']
+  ['PATCH', '/telegram/chats/9'],
+  # Granting another organization access is an owner action, so it rides the
+  # owner's client key — not the master key, which would put it under /admin.
+  ['GET',    '/telegram/bots/11/grants'],
+  ['POST',   '/telegram/bots/11/grants'],
+  ['DELETE', '/telegram/bots/11/grants/4']
 ].each do |method, path|
   expect(middleware, method, path, nil,        401)
   expect(middleware, method, path, 'nonsense', 403)

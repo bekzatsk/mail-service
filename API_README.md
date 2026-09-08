@@ -524,6 +524,8 @@ Each organization can have multiple clients (SMTP configs). Each client generate
 
 The Telegram gateway lets a client register one or more Telegram bots and use them to send/receive messages and dispatch slash-commands to client-owned handler URLs. All `/telegram/*` endpoints require a **client key**.
 
+A bot is owned by the **organization** of the client that connected it — every client in that organization can administer it. It can additionally be **granted** to other organizations, which then get everything except the bot itself. See [Sharing a bot](#sharing-a-bot-with-another-organization).
+
 ### Model
 
 - `client_telegram_bots` — one row per bot (token AES-256-CBC encrypted, identified by `name` like `main`/`alerts`).
@@ -531,6 +533,7 @@ The Telegram gateway lets a client register one or more Telegram bots and use th
 - `telegram_commands` — commands the bot exposes via `setMyCommands`. Each command has an optional `handlerUrl` (POSTed when a Telegram user invokes the command) and `handlerSecret` (sent as `X-Handler-Secret`).
 - `telegram_messages` — inbound/outbound audit log.
 - `telegram_bot_state` — per-bot `last_update_id` so listeners resume cleanly after restart.
+- `telegram_bot_grants` — organizations this bot has been lent to (see [Sharing a bot](#sharing-a-bot-with-another-organization)).
 
 A long-poll listener runs in-process (one Ruby thread per enabled bot). Restart the process and listeners resume from `last_update_id`.
 
@@ -538,9 +541,11 @@ A long-poll listener runs in-process (one Ruby thread per enabled bot). Restart 
 
 For endpoints that act on a bot (`/telegram/messages`, `/telegram/chats`, `/telegram/commands`), resolution order is:
 
-1. `botId` (numeric, scoped to your client) →
+1. `botId` (numeric) →
 2. `botName` (string) →
-3. the bot flagged `is_default = true` for your client.
+3. the bot flagged `is_default = true`.
+
+Each step searches every bot you can reach — your organization's own, plus any granted to it. A `botName` is unique per client but not across grants, so when two reachable bots answer to the same name your organization's own wins.
 
 ### POST /telegram/bots/test
 
@@ -570,11 +575,37 @@ Errors: `400` (validation), `409` (`name` already exists for this client).
 
 ### GET /telegram/bots / GET /telegram/bots/:id
 
-List or fetch your bots. Tokens are never returned.
+List or fetch your bots. Tokens are never returned. Each bot object:
+
+```json
+{
+  "id": 11,
+  "name": "main",
+  "botUsername": "acme_support_bot",
+  "botId": 123456789,
+  "isEnabled": true,
+  "deliveryMode": "webhook",
+  "webhookUrl": "https://email.innlab.kz/telegram/webhook/11",
+  "messageHandlerUrl": "https://your-project.example/telegram/message",
+  "hasMessageHandlerSecret": true,
+  "isDefault": true,
+  "lastError": null,
+  "lastSeen": "2026-09-07 12:03:11",
+  "createdAt": "2026-09-01 10:00:00",
+  "updatedAt": "2026-09-04 18:22:41",
+  "ownerOrganizationId": 1,
+  "ownerOrganizationName": "Acme Corporation",
+  "isOwner": true,
+  "grants": []
+}
+```
+
+`deliveryMode` is `polling` or `webhook`. Secrets (bot token, message handler
+secret, webhook secret) are never returned — only the boolean saying one is set.
 
 ### PATCH /telegram/bots/:id
 
-Any subset of `{ name, isEnabled, isDefault, botToken }`. If `botToken` changes, it's revalidated via `getMe`; the listener is restarted. If `isEnabled` flips, the listener is started/stopped accordingly.
+Any subset of `{ name, isEnabled, isDefault, botToken, messageHandlerUrl, messageHandlerSecret }`. If `botToken` changes, it's revalidated via `getMe`; the listener is restarted. If `isEnabled` flips, the listener is started/stopped accordingly. `messageHandlerUrl` is where non-command messages go — see [Inbound messages that are not commands](#inbound-messages-that-are-not-commands); an empty string clears it.
 
 ### DELETE /telegram/bots/:id
 
@@ -628,6 +659,79 @@ to enumerate bot ids.
 ### POST /telegram/bots/:id/sync-commands
 
 Force a `setMyCommands` call to Telegram. Usually unnecessary — `POST/PATCH/DELETE /telegram/commands` does this automatically.
+
+### Sharing a bot with another organization
+
+One bot, several organizations. The owner keeps the bot; the grantee gets to
+use it.
+
+A grant hands the other organization everything hanging off the bot — it
+registers its own chats and routes, edits commands, reads the bot's message
+history, and sends. It does **not** get the bot row itself: the token, the
+delivery mode and deleting the bot stay with the owner, because a token and a
+webhook are one-per-bot globals at Telegram and two organizations cannot both
+hold them.
+
+What a grant does not do is partition the bot. Everyone holding one sees the
+bot's whole traffic and can send to every route on it, because it is one
+Telegram identity. Grant a bot to an organization you would let post in every
+chat it already reaches; where that is not true, register a second bot with
+@BotFather instead.
+
+Owner-side endpoints take the **owner's client key**. A bot the caller merely
+borrows answers `404` here, not `403` — the same answer as a bot that does not
+exist, so the endpoint cannot be used to enumerate other organizations' bots.
+
+#### GET /telegram/bots/:id/grants
+
+```json
+{
+  "grants": [
+    { "id": 1, "botId": 11, "organizationId": 2, "organizationName": "Globex",
+      "organizationSlug": "globex", "createdAt": "2026-09-08 11:00:00" }
+  ]
+}
+```
+
+#### POST /telegram/bots/:id/grants
+
+Name the organization by id or by slug:
+
+```bash
+curl -X POST https://email.innlab.kz/telegram/bots/11/grants \
+  -H "X-Api-Key: <owner-client-key>" -H "Content-Type: application/json" \
+  -d '{"organizationSlug": "globex"}'
+```
+
+`201` with the grant. Errors: `400` (that organization already owns the bot),
+`404` (no such bot, or no such organization), `409` (it already has access).
+
+#### DELETE /telegram/bots/:id/grants/:grant_id
+
+Revokes it. The grantee's chats, routes and commands on the bot stay in the
+database; they simply stop being reachable, so re-granting restores them.
+
+#### Master-key equivalents
+
+The same table across every client, for an operator who is not holding the
+owner's key: `GET /admin/telegram/grants` (optional `?botId=` / `?organizationId=`),
+`POST /admin/telegram/grants` with `{botId, organizationId}`, and
+`DELETE /admin/telegram/grants/:id`.
+
+#### What the grantee sees
+
+`GET /telegram/bots` returns owned and granted bots together. Tell them apart
+with `isOwner`; `ownerOrganizationName` says who lent it:
+
+```json
+{
+  "id": 11, "name": "acme-support", "isOwner": false,
+  "ownerOrganizationId": 1, "ownerOrganizationName": "Acme Corporation"
+}
+```
+
+For an owner the same call adds `grants`, the list above, so the console can
+render access without a second request per bot.
 
 ### Routes — sending without a chat id
 
@@ -683,16 +787,27 @@ the chat registered. `409` if another chat on the same bot already holds the nam
 
 ### POST /telegram/messages
 
-Send a message. `botId` or `botName` optional (default bot used otherwise).
+Send a message. Address the chat with either `route` (preferred — see
+[Routes](#routes--sending-without-a-chat-id)) or a raw `chatId`. `botId` /
+`botName` are optional; the default bot is used otherwise.
+
+```json
+{
+  "route": "errors",
+  "text": "Channel X failed",
+  "parseMode": "Markdown",
+  "replyToMessageId": null,
+  "disableNotification": false
+}
+```
+
+The raw-id form, when the caller genuinely holds a chat id:
 
 ```json
 {
   "botName": "main",
   "chatId": 217860003,
-  "text": "Channel X failed",
-  "parseMode": "Markdown",
-  "replyToMessageId": null,
-  "disableNotification": false
+  "text": "Channel X failed"
 }
 ```
 
@@ -702,7 +817,10 @@ Response:
 { "id": 42, "telegramMessageId": 555, "status": "sent" }
 ```
 
-Failures are logged to `telegram_messages` with `status: "failed"` and return `500`.
+Errors: `400` (missing `text`, or neither `route` nor `chatId`), `404`
+(unknown route), `409` (the route name exists on more than one of your bots —
+add `botId` or `botName` to disambiguate). Send failures are logged to
+`telegram_messages` with `status: "failed"` and return `500`.
 
 ### GET /telegram/messages
 
@@ -825,4 +943,5 @@ Removes the command + re-syncs the menu.
 
 - Listeners are in-process threads. Production must support background threads outside of request handling: Puma OK; on Passenger set `passenger_min_instances ≥ 1` so a worker stays alive.
 - Two clients can register the same bot token. Telegram only delivers `getUpdates` to one poller at a time — the other listener will receive HTTP `409 Conflict`, store `last_error`, sleep 60s, retry. This is a Telegram protocol constraint, not a gateway bug.
-- Cross-client isolation: every query is scoped by `client_id` (derived from `X-Api-Key`). Client A cannot read/mutate client B's bots, chats, commands, or messages.
+- Isolation is per **organization**: every query resolves the bots the caller's organization owns or has been granted, and filters chats, commands and messages by those. An organization with no share of a bot cannot read or mutate anything on it.
+- Owner-only, on every bot: `PATCH`/`DELETE /telegram/bots/:id`, the three webhook endpoints, and the grant endpoints. Everything else a grantee can do.

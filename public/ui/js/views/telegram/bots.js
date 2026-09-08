@@ -2,6 +2,7 @@ import {
   el, field, openModal, confirmAction, toast, toastError,
   badge, relativeTime, formatDate, emptyState, withBusy
 } from '../../ui.js';
+import { getState } from '../../store.js';
 
 function botStatus(bot) {
   if (!bot.isEnabled) return badge('disabled', 'mute');
@@ -124,6 +125,104 @@ async function showWebhookInfo(api, bot) {
         : null
     ),
     footer: ({ close }) => el('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(true) })
+  });
+}
+
+// A grant lends the bot to another organization: its clients get the chats,
+// routes, commands, history and sending. It never gets the token, the webhook
+// or the delete button — those are one-per-bot and stay with the owner.
+async function openAccessDialog(api, bot, onDone) {
+  const rows = el('tbody');
+  const picker = el('select', { class: 'input' });
+  const error = el('p', { class: 'field__error' });
+  let grants = bot.grants || [];
+
+  const paint = () => {
+    const organizations = getState().organizations || [];
+    const taken = new Set(grants.map((grant) => grant.organizationId));
+
+    rows.replaceChildren(...(grants.length
+      ? grants.map((grant) => el('tr', {},
+          el('td', {},
+            el('div', { class: 'cell-strong', text: grant.organizationName || `#${grant.organizationId}` }),
+            el('div', { class: 'cell-sub mono', text: grant.organizationSlug || '' })
+          ),
+          el('td', { class: 'dim nowrap', text: grant.createdAt ? formatDate(grant.createdAt) : '—' }),
+          el('td', { class: 'right' },
+            el('button', {
+              class: 'btn btn--ghost btn--sm btn--danger', type: 'button', text: 'Revoke',
+              onclick: (event) => withBusy(event.currentTarget, async () => {
+                try {
+                  await api.revokeBotGrant(bot.id, grant.id);
+                  grants = grants.filter((entry) => entry.id !== grant.id);
+                  toast(`${grant.organizationName} can no longer use ${bot.name}`, 'success');
+                  paint();
+                  await onDone();
+                } catch (failure) {
+                  toastError(failure);
+                }
+              })
+            })
+          )
+        ))
+      : [el('tr', {}, el('td', { colspan: '3', class: 'dim',
+          text: 'Only this bot\u2019s own organization can use it.' }))]));
+
+    const available = organizations.filter((org) =>
+      !taken.has(org.id) && org.id !== bot.ownerOrganizationId);
+
+    picker.replaceChildren(
+      el('option', { value: '', text: available.length ? 'Select an organization…' : 'No other organization left' }),
+      ...available.map((org) => el('option', { value: String(org.id), text: `${org.name} (${org.slug})` }))
+    );
+    picker.disabled = available.length === 0;
+  };
+
+  paint();
+
+  await openModal({
+    title: `Access — ${bot.name}`,
+    wide: true,
+    render: () => el('div', { class: 'form-grid' },
+      el('p', { class: 'mid', text: 'Organizations listed here may register chats and routes on this bot, '
+        + 'edit its commands, read its message history and send through it. They cannot see or rotate the token, '
+        + 'change the transport, or delete the bot.' }),
+      el('p', { class: 'callout', text: 'One bot is one Telegram identity. A grantee can also reach the routes '
+        + 'the other organizations created on it — grant it to someone you would let post in every one of these chats.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'table' },
+          el('thead', {}, el('tr', {},
+            el('th', { text: 'Organization' }),
+            el('th', { text: 'Granted' }),
+            el('th', { class: 'right', text: '' })
+          )),
+          rows
+        )
+      ),
+      field('Grant access to', picker),
+      error
+    ),
+    footer: ({ close }) => [
+      el('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(true) }),
+      el('button', {
+        class: 'btn btn--primary', type: 'button', text: 'Grant access',
+        onclick: (event) => {
+          if (!picker.value) { error.textContent = 'Pick an organization first.'; return; }
+          error.textContent = '';
+          withBusy(event.currentTarget, async () => {
+            try {
+              const result = await api.grantBot(bot.id, { organizationId: Number(picker.value) });
+              grants = [...grants, result.grant];
+              toast(`${result.grant.organizationName} can now use ${bot.name}`, 'success');
+              paint();
+              await onDone();
+            } catch (failure) {
+              toastError(failure);
+            }
+          });
+        }
+      })
+    ]
   });
 }
 
@@ -288,53 +387,69 @@ async function removeBot(api, bot, onDone) {
 }
 
 function botRow(api, bot, onDone) {
+  // A borrowed bot shows the same rows and the same commands, but none of the
+  // buttons that touch the bot itself — the service would answer 404 anyway.
+  const owned = bot.isOwner !== false;
+  const grantCount = (bot.grants || []).length;
+
+  const syncMenu = el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Sync menu',
+    title: 'Push enabled commands to Telegram via setMyCommands',
+    onclick: (event) => withBusy(event.currentTarget, async () => {
+      try {
+        const result = await api.syncCommands(bot.id);
+        toast(result.success ? 'Command menu synced' : 'Telegram rejected the sync', result.success ? 'success' : 'error');
+      } catch (failure) {
+        toastError(failure);
+      }
+    }) });
+
+  const ownerActions = owned ? [
+    el('button', { class: 'btn btn--ghost btn--sm', type: 'button',
+      text: bot.isEnabled ? 'Stop' : 'Start',
+      onclick: () => toggleEnabled(api, bot, onDone) }),
+    bot.isDefault ? null : el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Make default',
+      onclick: () => makeDefault(api, bot, onDone) }),
+    syncMenu,
+    el('button', { class: 'btn btn--ghost btn--sm', type: 'button',
+      text: grantCount ? `Access · ${grantCount}` : 'Access',
+      title: 'Which other organizations may use this bot',
+      onclick: () => openAccessDialog(api, bot, onDone) }),
+    bot.deliveryMode === 'webhook'
+      ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Webhook',
+          title: 'What Telegram has registered', onclick: () => showWebhookInfo(api, bot) })
+      : null,
+    bot.deliveryMode === 'webhook'
+      ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use polling',
+          onclick: () => switchToPolling(api, bot, onDone) })
+      : el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use webhook',
+          title: 'Let Telegram push updates instead of polling for them',
+          onclick: () => switchToWebhook(api, bot, onDone) }),
+    el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Edit',
+      onclick: () => openEditDialog(api, bot, onDone) }),
+    el('button', { class: 'btn btn--ghost btn--sm btn--danger', type: 'button', text: 'Delete',
+      onclick: () => removeBot(api, bot, onDone) })
+  ] : [syncMenu];
+
   return el('tr', {},
     el('td', {},
       el('div', { class: 'cell-strong', text: bot.name }),
-      el('div', { class: 'cell-sub mono', text: bot.botUsername ? `@${bot.botUsername}` : '—' })
+      el('div', { class: 'cell-sub mono', text: bot.botUsername ? `@${bot.botUsername}` : '—' }),
+      owned ? null : el('div', { class: 'cell-sub',
+        text: `shared by ${bot.ownerOrganizationName || 'another organization'}` })
     ),
     el('td', {}, el('div', { class: 'badge-row' },
       botStatus(bot),
       bot.isDefault ? badge('default', 'info') : null,
-      bot.messageHandlerUrl ? badge('msg handler', 'info') : null)),
+      bot.messageHandlerUrl ? badge('msg handler', 'info') : null,
+      owned
+        ? (grantCount ? badge(`shared ×${grantCount}`, 'info') : null)
+        : badge('borrowed', 'warn'))),
     el('td', {}, transportBadge(bot)),
     el('td', { class: 'dim nowrap', text: bot.lastSeen ? relativeTime(bot.lastSeen) : 'never' }),
     el('td', {}, bot.lastError
       ? el('span', { class: 'mono', style: { color: 'var(--c-danger)', fontSize: 'var(--text-xs)' }, text: bot.lastError })
       : el('span', { class: 'dim', text: '—' })),
-    el('td', { class: 'right' },
-      el('div', { class: 'row-actions' },
-        el('button', { class: 'btn btn--ghost btn--sm', type: 'button',
-          text: bot.isEnabled ? 'Stop' : 'Start',
-          onclick: () => toggleEnabled(api, bot, onDone) }),
-        bot.isDefault ? null : el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Make default',
-          onclick: () => makeDefault(api, bot, onDone) }),
-        el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Sync menu',
-          title: 'Push enabled commands to Telegram via setMyCommands',
-          onclick: (event) => withBusy(event.currentTarget, async () => {
-            try {
-              const result = await api.syncCommands(bot.id);
-              toast(result.success ? 'Command menu synced' : 'Telegram rejected the sync', result.success ? 'success' : 'error');
-            } catch (failure) {
-              toastError(failure);
-            }
-          }) }),
-        bot.deliveryMode === 'webhook'
-          ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Webhook',
-              title: 'What Telegram has registered', onclick: () => showWebhookInfo(api, bot) })
-          : null,
-        bot.deliveryMode === 'webhook'
-          ? el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use polling',
-              onclick: () => switchToPolling(api, bot, onDone) })
-          : el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Use webhook',
-              title: 'Let Telegram push updates instead of polling for them',
-              onclick: () => switchToWebhook(api, bot, onDone) }),
-        el('button', { class: 'btn btn--ghost btn--sm', type: 'button', text: 'Edit',
-          onclick: () => openEditDialog(api, bot, onDone) }),
-        el('button', { class: 'btn btn--ghost btn--sm btn--danger', type: 'button', text: 'Delete',
-          onclick: () => removeBot(api, bot, onDone) })
-      )
-    )
+    el('td', { class: 'right' }, el('div', { class: 'row-actions' }, ownerActions))
   );
 }
 

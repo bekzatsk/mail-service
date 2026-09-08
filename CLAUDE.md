@@ -53,7 +53,11 @@ Sinatra + Rack microservice. Single entry point `config.ru` loads `.env`, runs `
 
 `organizations 1—N clients 1—N mail_logs`. The org is the security boundary for `/logs`: any client key in an org sees all logs across all clients in that org (see `MailHandler#logs` join). `mail_logs.to_address`, `cc`, `bcc` are JSON-encoded arrays stored as TEXT — read via `parse_json_field`.
 
-Telegram tables (migration 003) hang off `clients`, not `organizations`: `clients 1—N client_telegram_bots 1—N {telegram_chats, telegram_commands, telegram_messages}`, plus `telegram_bot_state` (1:1 with bot, stores `last_update_id` for resume). `client_telegram_bots.bot_token` is AES-256-CBC encrypted via the same `EncryptionService` as `clients.smtp_pass`. Cross-client isolation for `/telegram/*` is per-client (not per-org) — every query filters by `client['id']` from `X-Api-Key`.
+Telegram tables (migration 003) hang off `clients`: `clients 1—N client_telegram_bots 1—N {telegram_chats, telegram_commands, telegram_messages}`, plus `telegram_bot_state` (1:1 with bot, stores `last_update_id` for resume). `client_telegram_bots.bot_token` is AES-256-CBC encrypted via the same `EncryptionService` as `clients.smtp_pass`.
+
+Isolation for `/telegram/*` is per **organization**, not per client (it was per-client before migration 007). A bot is reachable by the organization of the client that connected it, plus every organization named in `telegram_bot_grants` (migration 007). Two SQL fragments in `TelegramHandler` — `BOT_SOURCE` / `BOT_JOIN_FOR_CHILD` plus `BOT_ACCESS` — carry that rule; every read of a bot or of a child row goes through them, so no query can quietly forget the grant. They expect `client['organization_id']` as the first bind parameter (the LEFT JOIN) and again wherever `BOT_ACCESS` is interpolated.
+
+The split of rights is *the bot row belongs to the owner, everything hanging off it is shared*. Owner-only (`owner_bot` lookup, 404 otherwise): `PATCH`/`DELETE /telegram/bots/:id`, the three webhook routes, and the grant routes. Grantee-and-owner (`accessible_bot`): chats, routes, commands, message history, sending. The line is not arbitrary — a bot token and a webhook registration are one-per-bot globals at Telegram, so they cannot be co-owned, while a chat row can. `telegram_messages` is scoped by accessible `bot_id` rather than by `client_id`, so an owner sees a grantee's sends on their bot and a grantee sees the bot's inbound traffic; the `client_id` column still records who sent.
 
 ### Telegram subsystem
 

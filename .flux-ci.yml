@@ -86,6 +86,9 @@ route-auth:
     # Decides whether an inbound message is a command, and so which handler it
     # reaches.
     - ruby test/telegram_command_parsing_test.rb
+    # Which organization may touch which bot: owner-only routes stay owner-only,
+    # and no bot read forgets the grant join.
+    - ruby test/telegram_access_test.rb
 
 console-smoke:
   stage: test

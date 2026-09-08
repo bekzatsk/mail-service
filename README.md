@@ -35,8 +35,10 @@ Two scopes matter and they are not the same, which is easy to get wrong:
   the whole organization's send history, including other clients' mail. If two
   tenants must not see each other's logs, they need separate organizations, not
   separate clients.
-- **Telegram is per client.** Bots, chats, commands and message history belong
-  to the client, not the organization. A key sees only its own bots.
+- **Telegram is per organization too.** A bot is owned by the organization of
+  the client that connected it, and every client key in that organization can
+  administer it. A bot can additionally be *granted* to other organizations —
+  see [Sharing a bot](#sharing-a-bot-with-another-organization).
 
 A second key exists for administration: the **master key**, set in `.env`. It
 creates organizations and clients and backs the admin console. It is not for
@@ -95,6 +97,31 @@ Route names are lowercased on write, so `Errors` and `errors` are the same
 route. A name is unique per bot. If the same name exists on two bots the send
 returns `409` and asks you to name the bot, rather than guessing which group an
 error report was meant for.
+
+### Sharing a bot with another organization
+
+One Telegram bot can serve several organizations. The owner keeps the bot; the
+others are granted the use of it — in the console, **Telegram → Bots →
+Access**, or:
+
+```bash
+curl -X POST https://your-host/telegram/bots/11/grants \
+  -H "X-Api-Key: <owner-client-key>" -H "Content-Type: application/json" \
+  -d '{"organizationSlug": "globex"}'
+```
+
+A grantee registers its own chats and routes on the bot, edits its commands,
+reads its message history and sends through it. It never sees the bot token,
+cannot switch the transport, and cannot delete the bot: a token and a webhook
+are one-per-bot globals at Telegram, so those cannot be co-owned. Revoke with
+`DELETE /telegram/bots/11/grants/:id` — the grantee's chats and routes stay in
+the database and come back if you grant it again.
+
+What sharing does not do is partition the bot. Everyone holding a grant sees
+the bot's whole traffic and can send to every route on it, because it is one
+Telegram identity with one inbox. Share a bot with an organization you would
+let post in every chat that bot already reaches. Where that is not true, the
+answer is a second bot from @BotFather, not a grant.
 
 ### Inbound: two transports
 
