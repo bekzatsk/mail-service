@@ -66,7 +66,8 @@ export async function render() {
   const statusFilter = el('select', { class: 'select' },
     el('option', { value: '', text: 'Any status' }),
     el('option', { value: 'sent', text: 'Delivered' }),
-    el('option', { value: 'failed', text: 'Failed' })
+    el('option', { value: 'failed', text: 'Failed' }),
+    el('option', { value: 'unknown', text: 'Outcome unknown' })
   );
 
   const search = el('input', { class: 'input', type: 'search', placeholder: 'Subject or recipient…' });

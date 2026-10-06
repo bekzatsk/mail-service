@@ -12,10 +12,12 @@ can change without a deploy on their side.
 Three levels, and everything else follows from them:
 
 ```
-organization          a tenant. The boundary that mail logs are scoped to.
+organization          a tenant. The boundary both mail logs and bots scope to.
   └── client          one set of SMTP credentials + one API key
         ├── mail      POST /send            → SMTP → mail_logs
         └── bots      POST /telegram/...    → Telegram
+                       ↑
+                       └── grant: another organization may use this bot too
 ```
 
 An **organization** is a tenant — a company, a product. It exists to group
@@ -364,12 +366,17 @@ Unlock it with the `MASTER_API_KEY` and manage:
 - **Organizations** — create, rename, re-slug, delete
 - **Clients & keys** — issue keys, edit SMTP config, test stored credentials, rotate or revoke
 - **Mail logs** — filter by organization, client, status or text; inspect the full envelope and the delivery error
-- **Telegram** — bots and their transport, routes, commands, chats, message history
+- **Telegram** — bots and their transport, routes, commands, chats, message history, and which other organizations may use a bot (**Bots → Access**)
 - **Send test** — compose a message through any client key
 
 The console keeps the master key in `sessionStorage`, or `localStorage` if you
 tick "keep me signed in", and sends it as `X-Api-Key`. It can read every client
 key, so unlock it only on a machine you trust and only over HTTPS.
+
+The Telegram tab works through the client key of whichever client is picked in
+the header "Scope" switcher, so it shows that client's organization's bots plus
+anything granted to it. A borrowed bot is marked and loses the buttons that
+touch the bot itself — the service answers `404` on those regardless.
 
 ## Setup
 

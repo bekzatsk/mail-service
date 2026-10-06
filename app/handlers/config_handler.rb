@@ -97,7 +97,8 @@ module Handlers
     def parse_json(request)
       body = request.body.read
       request.body.rewind
-      JSON.parse(body)
+      parsed = JSON.parse(body)
+      parsed.is_a?(Hash) ? parsed : {}
     rescue JSON::ParserError
       {}
     end

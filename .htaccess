@@ -1,1 +1,7 @@
-# Plesk manages Passenger automatically — no Passenger directives needed here
+# Plesk manages Passenger automatically — no Passenger directives needed here.
+
+# The application root is the document root. Passenger hands every path to the
+# app today, but should that ever change, nothing here is served as a file.
+<FilesMatch "^(\.env.*|\.git.*|\.flux-ci\.yml|config\.ru|Gemfile(\.lock)?|.*\.rb|.*\.sql|.*\.sh|.*\.md)$">
+  Require all denied
+</FilesMatch>

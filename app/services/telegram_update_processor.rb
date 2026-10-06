@@ -6,6 +6,7 @@ require 'json'
 require_relative 'database'
 require_relative 'encryption_service'
 require_relative 'telegram_service'
+require_relative 'outbound_url_policy'
 
 module Services
   # Turns one Telegram update into its side effects: log it, match a slash
@@ -23,6 +24,9 @@ module Services
     # plus stray args — Telegram caps a command at 32 and would not treat it as
     # one at all, so ours has to agree or the two disagree about what was sent.
     COMMAND_PATTERN = %r{\A/([A-Za-z0-9_]{1,32})(?:@\S+)?(?:\s+(.*))?\z}m
+
+    # A handler reply is one chat message; anything past this is not parsed.
+    MAX_REPLY_BYTES = 64 * 1024
 
     # Pure: what command, if any, a message text names.
     # Extracted so the dispatch decision can be tested without a database.
@@ -134,8 +138,13 @@ module Services
     # A handler that answers with no text is choosing silence, which is a normal
     # outcome — most inbound messages do not deserve a reply.
     def deliver(bot, msg, url, secret, payload, label:)
-      uri = URI.parse(url)
+      # The URL passed the policy when it was saved; re-check and resolve now,
+      # and connect to the address that passed rather than letting the socket
+      # resolve the name a second time. A record that changed since — or that
+      # answers differently to our resolver — cannot route this POST inward.
+      uri = OutboundUrlPolicy.parse!(url)
       http = Net::HTTP.new(uri.host, uri.port)
+      http.ipaddr = OutboundUrlPolicy.resolve!(uri.hostname)
       http.use_ssl = uri.scheme == 'https'
       http.open_timeout = 5
       http.read_timeout = ENV.fetch('TELEGRAM_HANDLER_TIMEOUT_SECONDS', '10').to_i
@@ -148,12 +157,12 @@ module Services
 
       response = http.request(req)
       body = begin
-        JSON.parse(response.body)
+        JSON.parse(response.body.to_s[0, MAX_REPLY_BYTES])
       rescue StandardError
         {}
       end
       reply_text = body.is_a?(Hash) ? body['text'] : nil
-      return if blank?(reply_text)
+      return if blank?(reply_text) || !reply_text.is_a?(String)
 
       send_text(
         bot,

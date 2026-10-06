@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Commands
 
@@ -31,7 +31,7 @@ No test framework: each test is a standalone script (`test/support/assertions.rb
 
 No linter configured. Migrations run automatically on boot — never invoke them manually.
 
-`AGENTS.md` is a copy of this file for Codex (only the header differs). Keep the two in sync when editing either.
+`CLAUDE.md` is a copy of this file for Claude Code (only the header differs). Keep the two in sync when editing either.
 
 The smoke test needs Playwright, which is not vendored: `npm i --no-save playwright@1.62.1 && npx playwright install chromium`. `node_modules/` is gitignored.
 

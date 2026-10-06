@@ -89,6 +89,16 @@ route-auth:
     # Which organization may touch which bot: owner-only routes stay owner-only,
     # and no bot read forgets the grant join.
     - ruby test/telegram_access_test.rb
+    # POST /send attachments - validation, pure stdlib.
+    - ruby test/attachment_validation_test.rb
+    # Outbound URL policy (SSRF), authenticated encryption, security headers,
+    # body cap, boot-time key check. Pure stdlib.
+    - ruby test/security_hardening_test.rb
+    # POST /send end to end with no network - MIME structure, idempotency,
+    # sent/failed/unknown, no payload in logs. Needs only the mail gem, which
+    # is pure Ruby. Real SMTP is never used, only a fake server on 127.0.0.1.
+    - gem install mail -v '~> 2.8' --no-document > /dev/null
+    - ruby test/mail_send_test.rb
 
 console-smoke:
   stage: test

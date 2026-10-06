@@ -231,7 +231,7 @@ module Handlers
         values << params['client_id'].to_i
       end
 
-      if %w[sent failed].include?(params['status'])
+      if %w[sent failed unknown].include?(params['status'])
         conditions << 'ml.status = ?'
         values << params['status']
       end
@@ -353,7 +353,8 @@ module Handlers
     def parse_json(request)
       body = request.body.read
       request.body.rewind
-      JSON.parse(body)
+      parsed = JSON.parse(body)
+      parsed.is_a?(Hash) ? parsed : {}
     rescue JSON::ParserError
       {}
     end

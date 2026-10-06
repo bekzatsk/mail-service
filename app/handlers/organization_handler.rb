@@ -13,8 +13,13 @@ module Handlers
         return json_response({ error: 'Missing required field: name' }, 400)
       end
 
-      name = data['name'].strip
-      slug = data['slug']&.strip || name.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '')
+      name = data['name'].to_s.strip
+      slug = data['slug'].to_s.strip
+      slug = name.downcase.gsub(/[^a-z0-9]+/, '-').gsub(/^-|-$/, '') if slug.empty?
+
+      unless slug.match?(/\A[a-z0-9-]{1,100}\z/)
+        return json_response({ error: 'Invalid slug (a-z, 0-9, dashes, max 100)' }, 400)
+      end
 
       # Check slug uniqueness
       existing = Services::Database.query('SELECT id FROM organizations WHERE slug = ?', [slug])
@@ -92,7 +97,8 @@ module Handlers
     def parse_json(request)
       body = request.body.read
       request.body.rewind
-      JSON.parse(body)
+      parsed = JSON.parse(body)
+      parsed.is_a?(Hash) ? parsed : {}
     rescue JSON::ParserError
       {}
     end

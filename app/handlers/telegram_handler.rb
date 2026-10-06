@@ -9,12 +9,20 @@ require_relative '../services/telegram_bot_supervisor'
 require_relative '../services/telegram_command_sync'
 require_relative '../services/telegram_update_processor'
 require_relative '../services/secure_compare'
+require_relative '../services/outbound_url_policy'
 
 module Handlers
   class TelegramHandler
     # A route is the address a calling project uses instead of a chat id, so it
     # has to be typed by hand into someone else's config: lowercase, no spaces.
     ROUTE_NAME_PATTERN = /\A[a-z0-9][a-z0-9_-]{0,63}\z/
+
+    # What a Telegram bot token looks like. It goes into the API URL path, so
+    # anything else is at best a wasted round-trip and at worst a path trick.
+    BOT_TOKEN_PATTERN = /\A\d{6,12}:[A-Za-z0-9_-]{30,64}\z/
+
+    MAX_SECRET_CHARS = 255
+    MAX_TEXT_CHARS = 4096
 
     # Every read of a bot goes through these two fragments so no query can
     # forget that a granted organization is allowed in. Both expect the
@@ -177,6 +185,7 @@ module Handlers
       data = parse_json(request)
       token = data['botToken']
       return error('Missing required field: botToken', 400) if blank?(token)
+      return error('botToken does not look like a Telegram bot token', 400) unless valid_token?(token)
 
       begin
         result = @telegram.get_me(token)
@@ -196,7 +205,9 @@ module Handlers
       is_default_req = data['isDefault'] == true
 
       return error('Missing required field: name', 400) if name.empty?
+      return error('name is too long (max 64)', 400) if name.length > 64
       return error('Missing required field: botToken', 400) if blank?(token)
+      return error('botToken does not look like a Telegram bot token', 400) unless valid_token?(token)
 
       begin
         me = @telegram.get_me(token)
@@ -267,6 +278,7 @@ module Handlers
 
       if data.key?('name')
         return error('name cannot be empty', 400) if blank?(data['name'])
+        return error('name is too long (max 64)', 400) if data['name'].to_s.strip.length > 64
         sets << 'name = ?'; params << data['name'].to_s.strip
       end
 
@@ -276,6 +288,8 @@ module Handlers
       end
 
       if data.key?('botToken') && !blank?(data['botToken'])
+        return error('botToken does not look like a Telegram bot token', 400) unless valid_token?(data['botToken'])
+
         begin
           me = @telegram.get_me(data['botToken'])
         rescue StandardError => e
@@ -294,19 +308,19 @@ module Handlers
       # Where anything a command row does not claim gets forwarded. Empty string
       # clears it, which switches plain messages back to log-only.
       if data.key?('messageHandlerUrl')
-        url = data['messageHandlerUrl'].to_s.strip
-        unless url.empty? || url.start_with?('http://', 'https://')
-          return error('messageHandlerUrl must be an http(s) URL', 400)
-        end
+        url, url_error = handler_url(data['messageHandlerUrl'], 'messageHandlerUrl')
+        return url_error if url_error
 
         sets << 'message_handler_url = ?'
-        params << (url.empty? ? nil : url)
+        params << url
       end
 
       if data.key?('messageHandlerSecret')
-        secret = data['messageHandlerSecret'].to_s
+        secret, secret_error = handler_secret(data['messageHandlerSecret'], 'messageHandlerSecret')
+        return secret_error if secret_error
+
         sets << 'message_handler_secret = ?'
-        params << (secret.empty? ? nil : secret)
+        params << secret
       end
 
       return error('No fields to update', 400) if sets.empty?
@@ -453,6 +467,8 @@ module Handlers
       text = data['text']
 
       return error('Missing required field: text', 400) if blank?(text)
+      return error('text must be a string', 400) unless text.is_a?(String)
+      return error("text is too long (max #{MAX_TEXT_CHARS})", 400) if text.length > MAX_TEXT_CHARS
 
       # A caller names either a route or a chat id. Routes exist so the calling
       # project never has to hold a chat id: the group behind "errors" can move
@@ -720,11 +736,16 @@ module Handlers
       data = parse_json(request)
       command     = data['command']
       description = data['description']
-      handler_url = data['handlerUrl']
 
       return error('Missing required field: command', 400) if blank?(command)
       return error('Missing required field: description', 400) if blank?(description)
       return error('Invalid command (1-32 chars, [a-z0-9_], no slash)', 400) unless command.to_s =~ /\A[a-z0-9_]{1,32}\z/i
+      return error('description is too long (max 255)', 400) if description.to_s.length > 255
+
+      handler_url, url_error = handler_url(data['handlerUrl'], 'handlerUrl')
+      return url_error if url_error
+      handler_secret, secret_error = handler_secret(data['handlerSecret'], 'handlerSecret')
+      return secret_error if secret_error
 
       bot = resolve_bot(client, data)
       return error('Bot not found', 404) unless bot
@@ -738,7 +759,7 @@ module Handlers
 
       Services::Database.query(
         'INSERT INTO telegram_commands (bot_id, command, description, handler_url, handler_secret) VALUES (?, ?, ?, ?, ?)',
-        [bot['id'], command, description, handler_url, data['handlerSecret']]
+        [bot['id'], command, description.to_s, handler_url, handler_secret]
       )
       new_id = Services::Database.connection.last_id
 
@@ -779,13 +800,18 @@ module Handlers
 
       if data.key?('description')
         return error('description cannot be empty', 400) if blank?(data['description'])
-        sets << 'description = ?'; params << data['description']
+        return error('description is too long (max 255)', 400) if data['description'].to_s.length > 255
+        sets << 'description = ?'; params << data['description'].to_s
       end
       if data.key?('handlerUrl')
-        sets << 'handler_url = ?'; params << data['handlerUrl']
+        url, url_error = handler_url(data['handlerUrl'], 'handlerUrl')
+        return url_error if url_error
+        sets << 'handler_url = ?'; params << url
       end
       if data.key?('handlerSecret')
-        sets << 'handler_secret = ?'; params << data['handlerSecret']
+        secret, secret_error = handler_secret(data['handlerSecret'], 'handlerSecret')
+        return secret_error if secret_error
+        sets << 'handler_secret = ?'; params << secret
       end
       if data.key?('isEnabled')
         sets << 'is_enabled = ?'; params << (data['isEnabled'] ? 1 : 0)
@@ -1082,7 +1108,8 @@ module Handlers
     def parse_json(request)
       body = request.body.read
       request.body.rewind
-      JSON.parse(body)
+      parsed = JSON.parse(body)
+      parsed.is_a?(Hash) ? parsed : {}
     rescue JSON::ParserError
       {}
     end
@@ -1093,6 +1120,33 @@ module Handlers
 
     def truthy?(value)
       value == 1 || value == true
+    end
+
+    def valid_token?(token)
+      token.is_a?(String) && token.match?(BOT_TOKEN_PATTERN)
+    end
+
+    # A handler URL is somewhere this service will POST to on a tenant's say-so.
+    # Empty clears it; anything else has to pass the outbound URL policy, which
+    # keeps the internal network and cloud metadata out of reach.
+    # @return [Array(String|nil, nil)] or [nil, error response]
+    def handler_url(raw, field)
+      text = raw.to_s.strip
+      return [nil, nil] if text.empty?
+
+      uri = Services::OutboundUrlPolicy.validate!(text)
+      [uri.to_s, nil]
+    rescue Services::OutboundUrlPolicy::Rejected => e
+      [nil, error("#{field}: #{e.message}", 400)]
+    end
+
+    def handler_secret(raw, field)
+      return [nil, nil] if raw.nil? || (raw.is_a?(String) && raw.empty?)
+      return [nil, error("#{field} must be a string", 400)] unless raw.is_a?(String)
+      return [nil, error("#{field} is too long (max #{MAX_SECRET_CHARS})", 400)] if raw.length > MAX_SECRET_CHARS
+      return [nil, error("#{field} must not contain control characters", 400)] if raw.match?(/[[:cntrl:]]/)
+
+      [raw, nil]
     end
 
     # Explicit override wins, then the configured public origin, then whatever

@@ -144,6 +144,11 @@ class App < Sinatra::Base
     emit mail_handler.send_mail(request, env['mail_service.client'])
   end
 
+  # Stored outcome of one /send attempt (attemptId from the /send response).
+  get '/send/:attempt_id' do
+    emit mail_handler.show_attempt(env['mail_service.client'], params['attempt_id'])
+  end
+
   get '/logs' do
     emit mail_handler.logs(env['mail_service.client'])
   end
@@ -269,8 +274,12 @@ class App < Sinatra::Base
     JSON.generate(error: 'Not found')
   end
 
-  # Global error handler
+  # Global error handler. The exception goes to the log, never to the caller:
+  # a raw message names tables, hosts and library internals, which is a map
+  # for anyone probing and of no use to a legitimate client.
   error do
-    JSON.generate(error: 'Internal server error', details: env['sinatra.error']&.message)
+    e = env['sinatra.error']
+    warn "[app] #{request.request_method} #{request.path_info}: #{e.class}: #{e.message}" if e
+    JSON.generate(error: 'Internal server error')
   end
 end

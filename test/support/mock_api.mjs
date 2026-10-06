@@ -103,6 +103,13 @@ const STATS = {
 
 const MIME = { html: 'text/html', css: 'text/css', js: 'text/javascript', json: 'application/json' };
 
+// Mirrors Middleware::SecurityHeaders::CSP (app/middleware/security_headers.rb).
+const CSP = [
+  "default-src 'none'", "script-src 'self'", "style-src 'self'", "img-src 'self' data:",
+  "font-src 'self'", "connect-src 'self'", "base-uri 'none'", "form-action 'self'",
+  "frame-ancestors 'none'"
+].join('; ');
+
 function json(res, payload, status = 200) {
   const body = JSON.stringify(payload);
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) });
@@ -117,7 +124,13 @@ function serveStatic(res, pathname) {
   }
   const body = fs.readFileSync(target);
   const type = MIME[target.split('.').pop()] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': `${type}; charset=utf-8`, 'Content-Length': body.length });
+  // The same policy Middleware::SecurityHeaders sends in production, so the
+  // smoke test fails on a console change that the real CSP would block.
+  res.writeHead(200, {
+    'Content-Type': `${type}; charset=utf-8`,
+    'Content-Length': body.length,
+    'Content-Security-Policy': CSP
+  });
   res.end(body);
 }
 

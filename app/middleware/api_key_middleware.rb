@@ -95,14 +95,26 @@ module Middleware
       @app.call(env)
     end
 
+    # Client keys are SecureRandom.hex(32): anything else cannot be one, and
+    # is answered without a database round-trip.
+    CLIENT_KEY_FORMAT = /\A[0-9a-f]{64}\z/
+
     def authenticate_client(api_key, env)
-      result = Services::Database.query(
-        'SELECT c.*, o.name AS organization_name, o.slug AS organization_slug
-         FROM clients c
-         JOIN organizations o ON o.id = c.organization_id
-         WHERE c.api_key = ?', [api_key]
-      )
-      client = result.first
+      return json_error('Invalid API key', 403) unless api_key.match?(CLIENT_KEY_FORMAT)
+
+      client = begin
+        Services::Database.query(
+          'SELECT c.*, o.name AS organization_name, o.slug AS organization_slug
+           FROM clients c
+           JOIN organizations o ON o.id = c.organization_id
+           WHERE c.api_key = ?', [api_key]
+        ).first
+      rescue StandardError => e
+        # This middleware sits outside the Sinatra error handler, so a database
+        # failure here would otherwise surface as the server's raw 500 page.
+        warn "[auth] client lookup failed: #{e.class}: #{e.message}"
+        return json_error('Service unavailable', 503)
+      end
 
       unless client
         return json_error('Invalid API key', 403)

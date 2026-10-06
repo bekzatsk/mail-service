@@ -9,24 +9,31 @@ module Services
 
     # Test SMTP connection + authentication without sending anything.
     #
+    # Certificate verification is on for both transports. It has to match what
+    # MailService does at send time — the mail gem verifies — or a test would
+    # pass against a server whose certificate the real send then rejects, and
+    # the password would have been handed to an unverified peer on the way.
+    #
     # @param smtp_host [String]
     # @param smtp_port [Integer]
     # @param smtp_user [String]
     # @param smtp_pass [String]
     # @return [Hash] { success: Boolean, message: String }
     def test(smtp_host:, smtp_port:, smtp_user:, smtp_pass:)
+      smtp_host = smtp_host.to_s
       smtp_port = smtp_port.to_i
-      use_ssl   = smtp_port == 465
-      use_tls   = !use_ssl
+      return { success: false, message: 'Invalid smtp_port' } unless smtp_port.positive? && smtp_port < 65_536
+
+      use_ssl = smtp_port == 465
 
       smtp = Net::SMTP.new(smtp_host, smtp_port)
       smtp.open_timeout = TIMEOUT
       smtp.read_timeout = TIMEOUT
 
       if use_ssl
-        smtp.enable_ssl(OpenSSL::SSL::SSLContext.new)
-      elsif use_tls
-        smtp.enable_starttls_auto
+        smtp.enable_tls(Net::SMTP.default_ssl_context)
+      else
+        smtp.enable_starttls_auto(Net::SMTP.default_ssl_context)
       end
 
       smtp.start(smtp_host, smtp_user, smtp_pass, :plain)

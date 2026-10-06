@@ -12,8 +12,8 @@ All authenticated endpoints use the `X-Api-Key` header. There are two key types:
 
 | Key type       | Header value            | Protects                              |
 |----------------|-------------------------|---------------------------------------|
-| **Master key** | `MASTER_API_KEY` from `.env` | `POST /organizations`, `POST /config` |
-| **Client key** | Returned by `POST /config`  | `POST /send`, `GET /logs`             |
+| **Master key** | `MASTER_API_KEY` from `.env` | `POST /organizations`, `POST /config`, everything under `/admin` |
+| **Client key** | Returned by `POST /config`  | `POST /send`, `GET /logs`, everything under `/telegram` |
 
 ```
 X-Api-Key: <master-key-or-client-key>
@@ -283,6 +283,15 @@ bot with `botId` or `botName` and the request returns `409` until you do.
 | `priority` | string            | no       | `"high"`, `"normal"`, or `"low"`                   |
 | `headers`  | object            | no       | Custom email headers (e.g. `{"X-Tag": "promo"}`)  |
 
+Address fields (`to`, `cc`, `bcc`, `replyTo`, `from`) take bare addresses
+only — `user@example.com`, not `Name <user@example.com>` — and at most 100
+recipients in total. `headers` may carry `X-*` headers plus `List-Unsubscribe`,
+`List-Unsubscribe-Post`, `List-Id`, `Precedence`, `Auto-Submitted`,
+`Organization`, `Comments`, `Keywords` and `Importance`; the headers that
+address or structure the message (`To`, `Bcc`, `From`, `Content-Type`,
+`Message-ID`, …) come from the typed fields and are refused here with a `400`.
+Line breaks inside any header value are replaced with spaces.
+
 **Minimal request:**
 
 ```bash
@@ -336,6 +345,208 @@ curl -X POST http://localhost:8080/send \
   "details": "Connection refused - connect(2) for smtp.example.com:587"
 }
 ```
+
+---
+
+### POST /send — attachments, idempotency and delivery status
+
+Everything in this section is additive. A call without `attachments` and
+without an idempotency key is accepted exactly as before, and every field the
+response used to carry is still there; the response only gains fields.
+
+#### Attachments
+
+**Additional request fields:**
+
+| Field            | Type     | Required | Description                                                          |
+|------------------|----------|----------|----------------------------------------------------------------------|
+| `attachments`    | object[] | no       | Files to attach. Absent, `null` or `[]` means none                   |
+| `idempotencyKey` | string   | no       | Fallback for the `Idempotency-Key` header (see below)                |
+
+Each attachment:
+
+| Field           | Type   | Required | Description                                                            |
+|-----------------|--------|----------|------------------------------------------------------------------------|
+| `filename`      | string | yes      | UTF-8, Cyrillic is fine. Sanitized (see below)                         |
+| `contentType`   | string | yes      | Must be in the allowlist. Default allowlist: `application/pdf` only    |
+| `contentBase64` | string | yes      | Standard base64 (RFC 4648), padded, **no line breaks**                 |
+
+```bash
+curl -X POST http://localhost:8080/send \
+  -H "Content-Type: application/json" \
+  -H "X-Api-Key: a1b2c3d4e5f6..." \
+  -H "Idempotency-Key: req-1042-offer-v3" \
+  -d '{
+    "to": "client@example.com",
+    "subject": "Коммерческое предложение REQ-1042",
+    "body": "Направляем согласованное предложение.",
+    "attachments": [
+      { "filename": "КП_REQ-1042_v3.pdf", "contentType": "application/pdf", "contentBase64": "JVBERi0xLjcK..." }
+    ]
+  }'
+```
+
+Validation, in order — the first failure answers, and nothing is sent or
+recorded:
+
+| Check                                                     | Status | `field`                          |
+|-----------------------------------------------------------|--------|----------------------------------|
+| Request body larger than `MAIL_MAX_REQUEST_BYTES`          | `413`  | —                                |
+| `attachments` is not an array                             | `400`  | `attachments`                    |
+| More than `MAIL_ATTACHMENTS_MAX_COUNT` items              | `413`  | `attachments`                    |
+| Item is not an object                                     | `400`  | `attachments[i]`                 |
+| `filename` missing, blank, or empty after sanitizing      | `400`  | `attachments[i].filename`        |
+| `contentType` missing                                     | `400`  | `attachments[i].contentType`     |
+| `contentType` not in `MAIL_ATTACHMENT_ALLOWED_TYPES`      | `415`  | `attachments[i].contentType`     |
+| `contentBase64` missing, empty or not strict base64       | `400`  | `attachments[i].contentBase64`   |
+| Decoded file over `MAIL_ATTACHMENT_MAX_BYTES`             | `413`  | `attachments[i].contentBase64`   |
+| All decoded files together over `MAIL_ATTACHMENTS_MAX_TOTAL_BYTES` | `413` | `attachments[i].contentBase64` |
+| `application/pdf` whose bytes do not start with `%PDF-`   | `400`  | `attachments[i].contentBase64`   |
+
+```json
+{
+  "error": "Invalid attachment",
+  "details": "attachments[0].contentType 'image/png' is not allowed (allowed: application/pdf)",
+  "field": "attachments[0].contentType"
+}
+```
+
+Filename sanitizing keeps UTF-8 letters and the extension; it removes control
+and format characters (CR/LF, NUL, bidi overrides), replaces `/ \ < > : " | ? *`
+with `_`, collapses whitespace, strips leading dots, and cuts the name to 180
+characters.
+
+The message is `multipart/mixed`: the body first (`text/plain`, or a
+`multipart/alternative` of text and HTML), then each attachment,
+base64-encoded. Non-ASCII filenames are written twice, the way the `mail` gem
+does it — RFC 2231 in `Content-Type: …; name*=utf-8''…` and an RFC 2047 encoded
+word in `Content-Disposition: attachment; filename="=?UTF-8?B?…?="` — so both
+old and new mail clients show the Cyrillic name.
+
+Attachment content is never logged or stored. `mail_logs` and
+`mail_send_attempts` keep only `{filename, contentType, size, sha256}`.
+
+#### Idempotency-Key
+
+Send `Idempotency-Key: <key>` (1–255 printable ASCII characters, no spaces).
+The body field `idempotencyKey` is accepted for callers that cannot set
+headers; the header wins, and giving both with different values is a `400`.
+Keys are scoped to the client (API key's client row), so two clients never
+collide.
+
+| Situation (same client, same key, within `MAIL_IDEMPOTENCY_TTL_HOURS`) | Result |
+|-----------------------------------------------------|----------------------------------------------------------------------|
+| First request                                       | Sent normally; the outcome is stored against the key                 |
+| Repeat, same payload, first one finished            | **Not sent again.** The stored outcome is returned with the original HTTP status, `"idempotentReplay": true` and header `Idempotent-Replayed: true` |
+| Repeat, same payload, first one still sending       | `409` `{ "error": "...still in progress", "status": "in_progress", "attemptId": "..." }` |
+| Repeat, **different** payload                       | `422` `{ "error": "Idempotency-Key was already used with a different request", "attemptId": "..." }` |
+| Attempt store unreachable                           | `503`, nothing sent                                                  |
+
+"Same payload" is a SHA-256 over the normalized request (recipients, sender,
+subject, body, flags, headers and each attachment's filename, content type,
+size and SHA-256). A replay of a `failed` attempt is still `failed` — to try
+again after a definite failure, use a new key. After the retention window the
+key is released and may be reused; the old attempt stays readable through
+`GET /send/:attemptId`.
+
+Validation errors (`400`/`413`/`415`) do not consume the key.
+
+#### Response fields
+
+| Field              | When                    | Meaning                                                            |
+|--------------------|-------------------------|--------------------------------------------------------------------|
+| `message`          | `sent`                  | `"Email sent successfully"` — unchanged                            |
+| `error`, `details` | `failed`, `unknown`     | As before; `details` is the SMTP/network error                     |
+| `status`           | always                  | `sent` \| `failed` \| `unknown` (`in_progress` only on `409`)      |
+| `attemptId`        | when recorded           | UUID of this attempt, for `GET /send/:attemptId`                   |
+| `messageId`        | always                  | The `Message-ID` header value (without `<>`) — known even when the outcome is unknown |
+| `smtpResponse`     | `sent`, when available  | The server's final reply to DATA, e.g. `250 2.0.0 Ok: queued as ABC123` |
+| `idempotencyKey`   | when a key was given    | The key                                                            |
+| `attachments`      | when there were any     | `[{ filename, contentType, size, sha256 }]` as sent (sanitized name) |
+| `idempotentReplay` | on a replay             | `true`                                                             |
+
+| `status`  | HTTP  | Meaning                                                                    | Retry? |
+|-----------|-------|----------------------------------------------------------------------------|--------|
+| `sent`    | `200` | The SMTP server accepted the message (250 after DATA)                      | —      |
+| `failed`  | `500` | Definitely not accepted: connection/auth/recipient failure, or an SMTP error reply to DATA | Yes, with a **new** key |
+| `unknown` | `504` | The body was transmitted but the final reply never arrived (timeout, connection drop) — the message may or may not have been queued | **No automatic retry.** Check `GET /send/:attemptId`, the recipient's mailbox (by `messageId`), or ask a human |
+
+```json
+{
+  "message": "Email sent successfully",
+  "status": "sent",
+  "attemptId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11",
+  "messageId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11@altyn.kz",
+  "smtpResponse": "250 2.0.0 Ok: queued as 4ZK1c2",
+  "idempotencyKey": "req-1042-offer-v3",
+  "attachments": [
+    { "filename": "КП_REQ-1042_v3.pdf", "contentType": "application/pdf", "size": 182344,
+      "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" }
+  ]
+}
+```
+
+```json
+{
+  "error": "Delivery outcome unknown, do not retry automatically",
+  "details": "Net::ReadTimeout",
+  "status": "unknown",
+  "attemptId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11",
+  "messageId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11@altyn.kz"
+}
+```
+
+The service itself never retries a send. `unknown` is also written to
+`mail_logs.status` (and is a filter value in `GET /admin/logs`).
+
+#### GET /send/:attemptId
+
+**Auth:** Client key. Only the client that made the attempt can read it; any
+other key, a malformed id, or an unknown id is `404`.
+
+```json
+{
+  "attemptId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11",
+  "status": "sent",
+  "messageId": "3f0c9a52-5f0e-4d8e-9d0c-2b8c7a0e4f11@altyn.kz",
+  "smtpResponse": "250 2.0.0 Ok: queued as 4ZK1c2",
+  "idempotencyKey": "req-1042-offer-v3",
+  "attachments": [ { "filename": "КП_REQ-1042_v3.pdf", "contentType": "application/pdf", "size": 182344, "sha256": "…" } ],
+  "createdAt": "2026-09-30 12:00:00 +0500",
+  "completedAt": "2026-09-30 12:00:02 +0500"
+}
+```
+
+`status` may also be `in_progress` (still sending — or the process died
+mid-send, in which case it stays so; treat a long-lived `in_progress` like
+`unknown`), `failed` (with `error`) or `unknown`. Fields without a value are
+omitted.
+
+`GET /logs` entries gain `attemptId` and `attachments` (metadata) when present.
+
+#### Configuration
+
+| ENV variable                        | Default                     | Meaning                                                   |
+|-------------------------------------|-----------------------------|-----------------------------------------------------------|
+| `MAIL_ATTACHMENTS_MAX_COUNT`        | `5`                         | Max attachments per message                               |
+| `MAIL_ATTACHMENT_MAX_BYTES`         | `10485760` (10 MiB)         | Max decoded size of one attachment                        |
+| `MAIL_ATTACHMENTS_MAX_TOTAL_BYTES`  | `20971520` (20 MiB)         | Max decoded size of all attachments together              |
+| `MAIL_ATTACHMENT_ALLOWED_TYPES`     | `application/pdf`           | Comma-separated MIME allowlist. `%PDF-` is checked for PDF |
+| `MAIL_MAX_REQUEST_BYTES`            | base64 of the total + 1 MiB (≈ 27 MiB) | Max `Content-Length` of `POST /send`           |
+| `MAIL_IDEMPOTENCY_TTL_HOURS`        | `24`                        | How long a key stays bound to its first attempt           |
+| `MAIL_SMTP_OPEN_TIMEOUT_SECONDS`    | `10`                        | SMTP connect timeout                                      |
+| `MAIL_SMTP_READ_TIMEOUT_SECONDS`    | `60`                        | SMTP reply timeout (was the `mail` gem's 5 s)             |
+
+Rack, Sinatra and Puma impose no body limit of their own. A reverse proxy in
+front of the app does: nginx defaults to `client_max_body_size 1m`, which
+rejects any real PDF with a `413` before the app sees it. Raise it (and
+Apache's `LimitRequestBody`, if set) to at least `MAIL_MAX_REQUEST_BYTES` on
+the host.
+
+Storage: migration `008_mail_send_attempts.sql` adds the `mail_send_attempts`
+table (unique `(client_id, idempotency_key)` — the insert of the `in_progress`
+row is the claim on a key, so concurrent duplicates cannot both send) and adds
+`attempt_id`, `attachments` and the `unknown` status to `mail_logs`.
 
 ---
 
@@ -462,6 +673,36 @@ Decrypts the stored SMTP password and runs the same connect+auth check as
 
 Removes the client, its mail logs and its Telegram bots.
 
+### GET /admin/telegram/grants
+
+Which organizations have been lent which bot, across every client. Optional
+filters: `?botId=` and `?organizationId=`.
+
+```json
+{
+  "grants": [
+    { "id": 1, "botId": 11, "botName": "acme-support", "botUsername": "acme_support_bot",
+      "ownerOrganizationName": "Acme Corporation",
+      "organizationId": 2, "organizationName": "Globex", "organizationSlug": "globex",
+      "createdAt": "2026-09-08 11:00:00" }
+  ]
+}
+```
+
+### POST /admin/telegram/grants
+
+```json
+{ "botId": 11, "organizationId": 2 }
+```
+
+`organizationSlug` works in place of `organizationId`. Same rules and same
+errors as the owner-key form — see
+[Sharing a bot](#sharing-a-bot-with-another-organization).
+
+### DELETE /admin/telegram/grants/:id
+
+Revokes one grant by its own id.
+
 ### GET /admin/logs
 
 Query parameters — all optional: `organization_id`, `client_id`,
@@ -491,7 +732,7 @@ Query parameters — all optional: `organization_id`, `client_id`,
 | 401       | Missing `X-Api-Key` header                 |
 | 403       | Invalid API key                            |
 | 404       | Resource not found                         |
-| 409       | Conflict (duplicate slug)                  |
+| 409       | Conflict (duplicate slug, route name, or grant) |
 | 500       | Server / SMTP error                        |
 
 ---
@@ -508,6 +749,18 @@ organizations 1──┘
 
 Each organization can have multiple clients (SMTP configs). Each client generates its own API key. Logs from `/logs` are scoped to the entire organization, so any client's API key within the org will return all logs for that org.
 
+The Telegram tables hang off `clients`, but their **security boundary is the organization**, the same as `/logs`:
+
+```
+clients 1──N client_telegram_bots 1──N telegram_chats
+                                  1──N telegram_commands
+                                  1──N telegram_messages
+                                  1──1 telegram_bot_state
+                                  1──N telegram_bot_grants N──1 organizations
+```
+
+A bot is reachable by the organization of the client that connected it, plus every organization in `telegram_bot_grants`. Chats, commands and messages are then filtered by the bots you can reach — never by the client that happened to create them.
+
 ---
 
 ## Notes
@@ -517,6 +770,7 @@ Each organization can have multiple clients (SMTP configs). Each client generate
 - SMTP passwords are encrypted with AES-256-CBC (OpenSSL) before being stored in the database and decrypted only at send time.
 - Each `/send` call is logged regardless of outcome — check `/logs` to audit delivery status.
 - The `/logs` endpoint returns logs for all clients within the same organization, not just the authenticating client.
+- The same holds for `/telegram/*`: a bot is visible to its owning organization and to any organization granted it, not to one client alone.
 
 ---
 
@@ -606,6 +860,13 @@ secret, webhook secret) are never returned — only the boolean saying one is se
 ### PATCH /telegram/bots/:id
 
 Any subset of `{ name, isEnabled, isDefault, botToken, messageHandlerUrl, messageHandlerSecret }`. If `botToken` changes, it's revalidated via `getMe`; the listener is restarted. If `isEnabled` flips, the listener is started/stopped accordingly. `messageHandlerUrl` is where non-command messages go — see [Inbound messages that are not commands](#inbound-messages-that-are-not-commands); an empty string clears it.
+
+Handler URLs (`messageHandlerUrl` here, `handlerUrl` on commands) are places
+this service will POST to on your behalf, so they are checked when saved and
+again before every call: `http` or `https`, a public host, the scheme's default
+port or a port ≥ 1024, no credentials in the URL. `localhost`, private ranges
+(`10/8`, `172.16/12`, `192.168/16`), loopback, link-local (`169.254/16`) and
+their IPv6 equivalents are refused with a `400` naming the field.
 
 ### DELETE /telegram/bots/:id
 
@@ -824,11 +1085,13 @@ add `botId` or `botName` to disambiguate). Send failures are logged to
 
 ### GET /telegram/messages
 
-Filter via query params: `botId`, `chatId`, `direction` (`inbound`|`outbound`), `limit` (max 500, default 100), `offset`.
+Inbound and outbound traffic for every bot you can reach — the ones your organization owns and the ones granted to it. An owner therefore sees a grantee's sends on their bot, and a grantee sees the bot's inbound messages; the `clientId` on each row still records who sent it.
+
+Filter via query params: `botId`, `chatId`, `direction` (`inbound`|`outbound`), `limit` (max 500, default 100), `offset`. A `botId` you cannot reach narrows the result to nothing rather than widening it.
 
 ### GET /telegram/messages/:id
 
-Single message (scoped to your client).
+Single message, scoped the same way.
 
 ### POST /telegram/chats
 
@@ -842,7 +1105,7 @@ Authorize a chat for a bot. `botId` or `botName` optional.
 
 ### GET /telegram/chats
 
-`?botId=...` to filter, otherwise all chats across your client's bots.
+`?botId=...` to filter, otherwise all chats across every bot you can reach — owned and granted alike.
 
 ### DELETE /telegram/chats/:id
 
@@ -929,7 +1192,7 @@ The text is sent back to the chat as a reply to the original message. Empty or m
 
 ### GET /telegram/commands
 
-`?botId=...` to filter.
+`?botId=...` to filter, otherwise all commands across every bot you can reach.
 
 ### PATCH /telegram/commands/:id
 
@@ -942,6 +1205,6 @@ Removes the command + re-syncs the menu.
 ### Operational notes
 
 - Listeners are in-process threads. Production must support background threads outside of request handling: Puma OK; on Passenger set `passenger_min_instances ≥ 1` so a worker stays alive.
-- Two clients can register the same bot token. Telegram only delivers `getUpdates` to one poller at a time — the other listener will receive HTTP `409 Conflict`, store `last_error`, sleep 60s, retry. This is a Telegram protocol constraint, not a gateway bug.
+- Two clients can register the same bot token. Telegram only delivers `getUpdates` to one poller at a time — the other listener will receive HTTP `409 Conflict`, store `last_error`, sleep 60s, retry, and on webhook the second `setWebhook` silently overwrites the first. This is a Telegram protocol constraint, not a gateway bug. It is also why [a grant](#sharing-a-bot-with-another-organization) is the supported way to share a bot: one registration, one transport, many organizations.
 - Isolation is per **organization**: every query resolves the bots the caller's organization owns or has been granted, and filters chats, commands and messages by those. An organization with no share of a bot cannot read or mutate anything on it.
 - Owner-only, on every bot: `PATCH`/`DELETE /telegram/bots/:id`, the three webhook endpoints, and the grant endpoints. Everything else a grantee can do.

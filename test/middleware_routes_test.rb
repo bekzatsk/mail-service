@@ -26,7 +26,9 @@ end
 require_relative '../app/middleware/api_key_middleware'
 
 MASTER_KEY = 'master-key-for-tests'
-CLIENT_KEY = 'client-key-for-tests'
+# A client key is SecureRandom.hex(32); the middleware refuses any other shape
+# before touching the database.
+CLIENT_KEY = 'c1' * 32
 
 # Only CLIENT_KEY resolves to a row; everything else looks like an unknown key.
 module Services
@@ -101,6 +103,7 @@ expect(middleware, 'POST',   '/telegram/webhook',    nil, 401)
 puts "\nClient-only — sending and the Telegram gateway"
 [
   ['POST', '/send'],
+  ['GET',  '/send/11111111-2222-4333-8444-555555555555'],
   ['GET',  '/logs'],
   ['GET',  '/telegram/bots'],
   ['POST', '/telegram/messages'],
